@@ -597,7 +597,7 @@ ParseOldPEImage(
         goto Failure;
     }
 
-    NtHeaderSize = FIELD_OFFSET(IMAGE_HEADER, DataDirectory); // sizeof(IMAGE_HEADER);
+    NtHeaderSize = FIELD_OFFSET(IMAGE_HEADER, DataDirectory);
 
     /* Make sure the old NT PE header fits into the size */
     TotalHeadersSize += NtHeaderOffset + NtHeaderSize;
@@ -606,9 +606,6 @@ ParseOldPEImage(
         PrintErrorReason(ErrorMalformedPE, "NT headers beyond image size");
         goto Failure;
     }
-
-    /* Now get a pointer to the old NT PE header */
-    // *pNtHeader = (PIMAGE_HEADER)RVA(pData, NtHeaderOffset);
 
     /* Allocate memory for the old NT PE header (excepting the Data directory)
      * and load it (it will be reallocated later to accomodate for the extra
@@ -650,26 +647,6 @@ ParseOldPEImage(
     }
 #endif
 
-#if 0
-    /* Get the COFF header */
-    * pFileHeader = &(*pNtHeader)->FileHeader;
-
-    /* Check for the presence of the optional header */
-    if ((*pFileHeader)->SizeOfOptionalHeader == 0)
-    {
-        PrintError("Unsupported PE image (no optional header)!\n");
-        goto Failure;
-    }
-
-    /* Make sure the optional file header fits into the size */
-    TotalHeadersSize += (*pFileHeader)->SizeOfOptionalHeader;
-    if (TotalHeadersSize >= nFileSize)
-    {
-        PrintError("NT optional header beyond image size!\n");
-        goto Failure;
-    }
-#endif
-
     /* Verify that we are not actually looking at a new PE image */
     if (NtHeaderSize >= RTL_SIZEOF_THROUGH_FIELD(IMAGE_NT_HEADERS32, OptionalHeader.Magic))
     {
@@ -686,7 +663,31 @@ ParseOldPEImage(
         }
     }
 
-    // TODO: Check ULONG NtHeader->HeaderSize;
+    /*
+     * The total size of headers reported is equal to the combined size of:
+     * the original DOS header size (+ its DOS stub), PE header, and section headers.
+     * Contrary to the case of the new PE format, the old PE format does not
+     * round it up to a multiple of FileAlignment (i.e. NtHeader->FileAlign).
+     *
+     * I will suppose that the size of the DOS header + its DOS stub is equal
+     * to all the space from the beginning of the image up to the offset where
+     * the old PE header starts, specified by DosHeader->e_lfanew.
+     *
+     * Also I suppose for now that the NumberOfXXX members are valid;
+     * should they not be, it is most probable this HeaderSize check
+     * will fail, and consequently the other checks on the NumberOfXXX
+     * done below fail as well.
+     */
+    TotalHeadersSize = NtHeaderOffset /* DosHeader->e_lfanew */;
+    TotalHeadersSize += FIELD_OFFSET(IMAGE_HEADER, DataDirectory) +
+                        NtHeader->NumberOfSpecialRVAs * sizeof(IMAGE_SPECIAL_DIRECTORY) +
+                        NtHeader->NumberOfObjects * sizeof(IMAGE_OBJECT_HEADER);
+    if (NtHeader->HeaderSize != TotalHeadersSize)
+    {
+        // PrintErrorReason(ErrorInvalidPE, ...);
+        PrintWarning("The reported NT header size %lu does not match the calculated size %lu!\n",
+                     NtHeader->HeaderSize, (ULONG)TotalHeadersSize);
+    }
 
     /* If any of the reserved fields are non-zero, print a warning but continue */
     if ((NtHeader->Reserved1 != 0) || (NtHeader->Reserved2 != 0) || (NtHeader->Reserved3 != 0) ||
@@ -711,23 +712,21 @@ ParseOldPEImage(
     }
 
     /* Verify that the objects/sections count and table are valid */
-    if (((NtHeader->NumberOfObjects == 0) && (NtHeader->ObjectTableRVA != 0)) ||
-        ((NtHeader->NumberOfObjects != 0) && (NtHeader->ObjectTableRVA == 0)))
+    if ( ((NtHeader->NumberOfObjects == 0) && (NtHeader->ObjectTableRVA != 0)) ||
+         ((NtHeader->NumberOfObjects != 0) && (NtHeader->ObjectTableRVA == 0)) ||
+         (NtHeader->NumberOfObjects > MAXUSHORT) )
     {
         PrintErrorReason(ErrorInvalidPE, "Invalid number of objects / object table");
         goto Failure;
     }
 
-    // if (sizeof(IMAGE_HEADER) + NtHeader->NumberOfObjects * sizeof(IMAGE_OBJECT_HEADER) > NtHeader->HeaderSize)
-
     /* Normalize for safety */
     if (NtHeader->NumberOfObjects == 0)
         NtHeader->ObjectTableRVA = 0;
 
-    /* Perform any necessary re-allocation to accomodate for the Data directory array and objects table */
     if (NtHeader->NumberOfSpecialRVAs)
     {
-        /***/DataDirectorySize = RTL_FIELD_SIZE(IMAGE_HEADER, DataDirectory);/***/
+        // DataDirectorySize = RTL_FIELD_SIZE(IMAGE_HEADER, DataDirectory);
         DataDirectorySize = NtHeader->NumberOfSpecialRVAs * sizeof(IMAGE_SPECIAL_DIRECTORY);
         NtHeaderSize += DataDirectorySize;
     }
@@ -735,31 +734,29 @@ ParseOldPEImage(
     {
         ASSERT(NtHeader->ObjectTableRVA);
         ObjectsTableSize = NtHeader->NumberOfObjects * sizeof(IMAGE_OBJECT_HEADER);
+
+        /* Make sure the object table fits into the size */
+        if (NtHeader->ObjectTableRVA + ObjectsTableSize >= nFileSize)
+        {
+            PrintErrorReason(ErrorMalformedPE, "Object table beyond image size");
+            goto Failure;
+        }
+
+        /* NOT BROKEN: The object table must be **after** the PE header */
+        if (NtHeader->ObjectTableRVA < NtHeaderOffset + NtHeaderSize)
+        {
+            PrintErrorReason(ErrorMalformedPE, "Object table not following the PE header");
+            goto Failure;
+        }
+
         NtHeaderSize += ObjectsTableSize;
     }
 
+    /*
+     * Perform any necessary re-allocation to accomodate for the Data directory array and objects table.
+     */
     if (NtHeaderSize > (size_t)FIELD_OFFSET(IMAGE_HEADER, DataDirectory))
     {
-#if 0 // FIXME!!
-
-        if (NtHeader->NumberOfObjects)
-        {
-            /* Make sure the object table fits into the size */
-            if (NtHeader->ObjectTableRVA + NtHeader->NumberOfObjects * sizeof(IMAGE_OBJECT_HEADER) >= nFileSize)
-            {
-                PrintErrorReason(ErrorMalformedPE, "Object table beyond image size");
-                goto Failure;
-            }
-
-            /* NOT BROKEN: The object table must be **after** the PE header */
-            if (NtHeader->ObjectTableRVA < NtHeaderOffset + sizeof(IMAGE_HEADER))
-            {
-                PrintErrorReason(ErrorMalformedPE, "Object table not following the PE header");
-                goto Failure;
-            }
-        }
-#endif
-
         /* Reallocate the NT PE header to accomodate for the Data directory array and the object table */
         ptr = realloc(NtHeader, NtHeaderSize);
         if (!ptr)
@@ -774,8 +771,8 @@ ParseOldPEImage(
             /* Load it */
             fseek(pImageFile, NtHeaderOffset + FIELD_OFFSET(IMAGE_HEADER, DataDirectory), SEEK_SET);
             // if (!fread(&NtHeader->DataDirectory, DataDirectorySize, 1, pImageFile))
-            if (!fread(&NtHeader->DataDirectory, sizeof(IMAGE_SPECIAL_DIRECTORY) /*RTL_FIELD_SIZE(IMAGE_HEADER, DataDirectory)*/,
-                       NtHeader->NumberOfSpecialRVAs /*1*/, pImageFile))
+            if (!fread(&NtHeader->DataDirectory, sizeof(IMAGE_SPECIAL_DIRECTORY),
+                       NtHeader->NumberOfSpecialRVAs, pImageFile))
             {
                 PrintError("Failed to read %lu bytes from source file\n", (ULONG)DataDirectorySize);
                 goto Failure;
@@ -785,7 +782,6 @@ ParseOldPEImage(
         if (ObjectsTableSize)
         {
             /* Get a pointer to the object table */
-            // ObjTable = (PIMAGE_OBJECT_HEADER)(NtHeader + 1); // RVA(NtHeader, sizeof(IMAGE_HEADER));
             ObjTable = RVA(NtHeader, FIELD_OFFSET(IMAGE_HEADER, DataDirectory) + DataDirectorySize);
 
             /* Load it */
@@ -1270,25 +1266,32 @@ ProcessPEImage(
 
     FileHeader->Machine = IMAGE_FILE_MACHINE_UNKNOWN;
     //
-    // TODO: INVESTIGATE: I am going to assume that CPUType == 1
-    // is for MIPS little endian machines, since this is with that
-    // that Microsoft historically developed NT.
-    // I may be wrong!
+    // INVESTIGATE: I am going to assume that CPUType == 1 is for Intel i860,
+    // since it is with this CPU that Microsoft historically developed NT.
+    // CPUType == 2 is for Intel i386, as shown by the i386 NT PDK PE images.
+    // Finally I assume that CPUType == 3 is for MIPS R4000 little endian,
+    // as this is the other main platform to support NT.
+    // Any other value is presently unknown.
     //
     if (NtHeader->CPUType == 1)
-        FileHeader->Machine = IMAGE_FILE_MACHINE_R4000;
+        FileHeader->Machine = IMAGE_FILE_MACHINE_I860;
     else if (NtHeader->CPUType == 2)
         FileHeader->Machine = IMAGE_FILE_MACHINE_I386;
-    // TODO: Any other CPU type mappings?
+    else if (NtHeader->CPUType == 3)
+        FileHeader->Machine = IMAGE_FILE_MACHINE_R4000;
 
-    FileHeader->NumberOfSections      = min(NtHeader->NumberOfObjects, MAXUSHORT); // FIXME: Do this conversion beforehand.
-    FileHeader->TimeDateStamp         = NtHeader->TimeStamp;
-    FileHeader->PointerToSymbolTable  = 0; // FIXME: To be determined when converting the .debug section
-    FileHeader->NumberOfSymbols       = 0; // FIXME: To be determined when converting the .debug section
-    FileHeader->SizeOfOptionalHeader  = SizeOfOptionalHeader;
+    ASSERT(NtHeader->NumberOfObjects <= MAXUSHORT);
+    FileHeader->NumberOfSections = (USHORT)NtHeader->NumberOfObjects;
+    FileHeader->TimeDateStamp    = NtHeader->TimeStamp;
+    /*
+     * The following fields will be determined below, when converting the .debug section.
+     * FileHeader->PointerToSymbolTable;
+     * FileHeader->NumberOfSymbols;
+     */
+    FileHeader->SizeOfOptionalHeader = SizeOfOptionalHeader;
 
     //
-    // TODO: INVESTIGATE: Are these flags encoded in NtHeader->ModuleFlags ??
+    // INVESTIGATE: Are these flags encoded in NtHeader->ModuleFlags ??
     // --> DLLs have 0xA0008300, while EXEs have 0xA0000200 (mostly commandline) or 0xA0000300 (GUI or the subsystems...)
     //
     /* We are definitively an executable image */
@@ -1341,11 +1344,10 @@ ProcessPEImage(
      * the original DOS header size (+ its DOS stub), PE header, and section headers
      * rounded up to a multiple of FileAlignment.
      *
-     * In order to determine the size of the DOS header + its DOS stub size,
-     * I will suppose that this is all the space from the beginning of the image
-     * up to the offset where the old PE header starts, specified by DosHeader->e_lfanew.
+     * I will suppose that the size of the DOS header + its DOS stub is equal
+     * to all the space from the beginning of the image up to the offset where
+     * the old PE header starts, specified by DosHeader->e_lfanew.
      */
-    // OptHeader->SizeOfHeaders = NtHeader->HeaderSize;
     OptHeader->SizeOfHeaders = ROUND_UP(DosHeader->e_lfanew + TotalHeadersSize, NtHeader->FileAlign);
 
     // TODO: If original CheckSum == 0 then keep it, otherwise
@@ -1561,7 +1563,7 @@ ProcessPEImage(
             SectionName     = NULL;
             Characteristics = 0;
 
-            // TODO: INVESTIGATE: Can we deduce the characteristics
+            // INVESTIGATE: Can we deduce the characteristics
             // from ObjTable[i].ObjectFlags as well?
 
             /* Is this section a possible .bss section? */
@@ -1601,11 +1603,7 @@ ProcessPEImage(
                 {
                     if (j == IMAGE_DIRECTORY_ENTRY_EXPORT)
                     {
-                        //
-                        // TODO: Investigate whether it's the name ".EXPORTS"
-                        // that makes IDA to want to limit the number of exports.
-                        //
-                        /** SectionName     = ".EXPORTS"; **/
+                        // SectionName     = ".EXPORTS";
                         SectionName     = SectionFlags[SECTION_FLAGS_EDATA].SectionName;
                         Characteristics = SectionFlags[SECTION_FLAGS_EDATA].Characteristics;
                     }
@@ -1875,6 +1873,11 @@ ProcessPEImage(
     else if (!Section)
         PrintWarning("WARNING: Could not load the debug section, ignoring...\n");
 #endif
+
+    // FIXME: To be determined when converting the .debug section
+    // FileHeader->PointerToSymbolTable = 0;
+    // FileHeader->NumberOfSymbols = 0;
+
     if (Section)
     {
         BOOLEAN IsOldDebug = FALSE;
