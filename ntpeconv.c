@@ -520,7 +520,7 @@ DumpOldPEImage(
  *          any other error happened).
  *
  * Sanitization includes:
- * 
+ *
  * - Making NumberOfObjects and ObjectTableRVA fields consistent.
  *
  * - Making NumberOfDirectives and DirectiveTableRVA fields consistent.
@@ -1085,7 +1085,7 @@ LoadDirectoryEntryAndSection(
         return NULL;
     if (DirectoryEntry->Size == 0)
         return NULL;
-    
+
     /* Get a pointer to the object table; the ObjectTableRVA has been already
      * adjusted so that it systematically points just after the structure. */
     if (NtHeader->ObjectTableRVA)
@@ -1163,7 +1163,7 @@ LoadDirectoryEntryAndSection(
  *          The description of the section is passed via SectionHdr;
  *          the data of the section is passed in the Section buffer.
  *          Returns TRUE if success, FALSE otherwise.
- * 
+ *
  * IMPORTANT NOTE: The section data written to the file is truncated
  * to the value stored in SectionHdr->OnDiskSize.
  **/
@@ -1255,12 +1255,13 @@ ProcessPEImage(
     FileHeader = &NtHeaders->FileHeader;
     OptHeader  = &NtHeaders->OptionalHeader;
 
-    //
-    // TODO!!
-    //
-    // NtHeader->DirectiveTableRVA;
-    // NtHeader->NumberOfDirectives;
-    // NtHeader->OSType; --> Seems to be always 4.
+    /* Directives are unsupported in PE images (they are object only) */
+    ASSERT(NtHeader->NumberOfDirectives == 0);
+    ASSERT(NtHeader->DirectiveTableRVA == 0);
+
+    // INVESTIGATE: NtHeader->OSType seems to be always 4.
+    if (NtHeader->OSType != 4)
+        PrintWarning("WARNING: Unknown OSType value %d\n", NtHeader->OSType);
 
     NtHeaders->Signature = IMAGE_NT_SIGNATURE;
 
@@ -1291,8 +1292,9 @@ ProcessPEImage(
     FileHeader->SizeOfOptionalHeader = SizeOfOptionalHeader;
 
     //
-    // INVESTIGATE: Are these flags encoded in NtHeader->ModuleFlags ??
-    // --> DLLs have 0xA0008300, while EXEs have 0xA0000200 (mostly commandline) or 0xA0000300 (GUI or the subsystems...)
+    // INVESTIGATE: Examples of flags encoded in NtHeader->ModuleFlags:
+    // --> DLLs have 0xA0008300, while EXEs have 0xA0000200 (mostly commandline) or 0xA0000300 (GUI or the subsystems).
+    // --> NtHeader->ModuleFlags & 0x0700) == 0x0200 means the module is Windows CUI subsystem (see below).
     //
     /* We are definitively an executable image */
     FileHeader->Characteristics = IMAGE_FILE_EXECUTABLE_IMAGE;
@@ -1301,10 +1303,10 @@ ProcessPEImage(
         FileHeader->Characteristics |= IMAGE_FILE_BYTES_REVERSED_HI; /* Big endian */
     else
         FileHeader->Characteristics |= IMAGE_FILE_BYTES_REVERSED_LO; /* Little endian */
-    //// HACK!!
+    // HACK: Force 32-bit machine when it's for an i386 processor.
     if (FileHeader->Machine == IMAGE_FILE_MACHINE_I386)
         FileHeader->Characteristics |= IMAGE_FILE_32BIT_MACHINE;
-    //// END HACK!!
+    // END HACK!!
     if (NtHeader->ModuleFlags & 0x8000)
         FileHeader->Characteristics |= IMAGE_FILE_DLL;
 
@@ -1334,8 +1336,8 @@ ProcessPEImage(
     OptHeader->MinorOperatingSystemVersion = NtHeader->OSMinor;
     OptHeader->MajorImageVersion           = NtHeader->UserMajor;
     OptHeader->MinorImageVersion           = NtHeader->UserMinor;
-    OptHeader->MajorSubsystemVersion       = 0; // FIXME!
-    OptHeader->MinorSubsystemVersion       = 0; // FIXME!
+    OptHeader->MajorSubsystemVersion       = 0;
+    OptHeader->MinorSubsystemVersion       = 0;
     OptHeader->Win32VersionValue           = 0;
     OptHeader->SizeOfImage                 = NtHeader->ImageSize; // FIXME!
 
@@ -1377,7 +1379,7 @@ ProcessPEImage(
                                       OptHeader->Subsystem = NtHeader->SubSystem;
     }
 
-    OptHeader->DllCharacteristics  = 0; // FIXME?
+    OptHeader->DllCharacteristics  = 0;
     OptHeader->SizeOfStackReserve  = NtHeader->StackReserve;
     OptHeader->SizeOfStackCommit   = NtHeader->StackCommit;
     OptHeader->SizeOfHeapReserve   = NtHeader->HeapReserve;
@@ -1402,7 +1404,7 @@ ProcessPEImage(
                                            NtHeader,
                                            IMAGE_DIRECTORY_ENTRY_EXPORT,
                                            &Directory.Export,
-                                           NULL,
+                                           &DirectorySize,
                                            &SectionHdr,
                                            &SectionSize);
 #if 0
@@ -1413,28 +1415,13 @@ ProcessPEImage(
 #endif
     if (Section && Directory.Export)
     {
-        size_t NamesTableSize = Directory.Export->NumberOfNames * sizeof(ULONG);
+        PULONG NamesTable = NULL;
+        size_t TableSize;
+        ULONG_PTR EndData, EndDirectory;
+        PSTR StringPtr;
+        ULONG i;
 
         ASSERT(SectionHdr);
-
-        /*
-         * In later-PE style, the reported size of the export directory counts
-         * the size of all the primary data (sizeof(IMAGE_EXPORT_DIRECTORY))
-         * **PLUS** the size of all the data from the tables, and not just
-         * sizeof(IMAGE_EXPORT_DIRECTORY) as in the old-PE format.
-         * The "new"-PE style from October 1991 builds does not do that yet,
-         * and therefore some modern tools (e.g. IDA) will complain about the
-         * number of reported exports v.s. some "limit" calculated via the
-         * reported export directory size.
-         */
-        //
-        // TODO: FIXME!
-        //
-        // NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-        // OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-        //
-
-        C_ASSERT(sizeof(IMAGE_EXPORT_DIRECTORY) == 0x28);
 
         /* In old-PE style, these RVAs are from the beginning of the
          * export section. Convert them to RVAs from the base of the image. */
@@ -1443,19 +1430,18 @@ ProcessPEImage(
         Directory.Export->AddressOfNames += SectionHdr->RVA;
         Directory.Export->AddressOfNameOrdinals += SectionHdr->RVA;
 
+        TableSize = Directory.Export->NumberOfNames * sizeof(ULONG);
+
         /* Sanity check: Check that the export function table is
          * fully contained in the section, otherwise bail out. */
         if ( !((SectionHdr->RVA <= Directory.Export->AddressOfNames) &&
-               (Directory.Export->AddressOfNames + NamesTableSize < SectionHdr->RVA + SectionSize)) )
+               (Directory.Export->AddressOfNames + TableSize < SectionHdr->RVA + SectionSize)) )
         {
             /* Nope */
-            PrintWarning("WARNING: Could not load the export table, ignoring...\n");
+            PrintWarning("WARNING: Could not load the export names table, ignoring...\n");
         }
         else
         {
-            PULONG NamesTable;
-            ULONG i;
-
             /* The export table points inside the export section */
             ASSERT(SectionHdr->RVA <= Directory.Export->AddressOfNames);
             NamesTable = RVA(Section, Directory.Export->AddressOfNames - SectionHdr->RVA);
@@ -1467,6 +1453,68 @@ ProcessPEImage(
                 NamesTable[i] += SectionHdr->RVA;
             }
         }
+
+        /*
+         * In later-PE style, the reported size of the export directory counts
+         * the size of all the primary data (sizeof(IMAGE_EXPORT_DIRECTORY))
+         * **PLUS** the size of all the data from the tables, and not just
+         * sizeof(IMAGE_EXPORT_DIRECTORY) as in the old-PE format.
+         * The "new"-PE style from October 1991 builds does not do that yet,
+         * and therefore some modern tools (e.g. IDA) will complain about the
+         * number of reported exports v.s. some "limit" calculated via the
+         * reported export directory size.
+         */
+        if (DirectorySize != sizeof(IMAGE_EXPORT_DIRECTORY))
+        {
+            PrintWarning("WARNING: Unexpected old-PE EXPORT directory size %ld, expected %ld\n",
+                         DirectorySize, (ULONG)sizeof(IMAGE_EXPORT_DIRECTORY));
+        }
+        /*
+         * Re-calculate the size of the directory.
+         * To do this we find/calculate the maximum possible RVA value
+         * from all the data pointed by the directory.
+         */
+        EndDirectory = 0;
+
+        /* AddressOfFunctions table */
+        TableSize = Directory.Export->NumberOfFunctions * sizeof(ULONG);
+        EndData = Directory.Export->AddressOfFunctions + TableSize;
+        EndDirectory = max(EndDirectory, EndData);
+
+        /* AddressOfNames table */
+        TableSize = Directory.Export->NumberOfNames * sizeof(ULONG);
+        EndData = Directory.Export->AddressOfNames + TableSize;
+        EndDirectory = max(EndDirectory, EndData);
+
+        /* AddressOfNameOrdinals table */
+        EndData = Directory.Export->AddressOfNameOrdinals + TableSize;
+        EndDirectory = max(EndDirectory, EndData);
+
+        /* Name string */
+        StringPtr = RVA(Section, Directory.Export->Name - SectionHdr->RVA);
+        // strnlen(StringPtr, SectionSize - (Directory.Export->Name - SectionHdr->RVA));
+        EndData = Directory.Export->Name + (strlen(StringPtr) + 1) * sizeof(CHAR);
+        EndDirectory = max(EndDirectory, EndData);
+
+        /* Browse the Names table */
+        if (NamesTable)
+        {
+            for (i = 0; i < Directory.Export->NumberOfNames; ++i)
+            {
+                StringPtr = RVA(Section, NamesTable[i] - SectionHdr->RVA);
+                // strnlen(StringPtr, SectionSize - (NamesTable[i] - SectionHdr->RVA));
+                EndData = NamesTable[i] + (strlen(StringPtr) + 1) * sizeof(CHAR);
+                EndDirectory = max(EndDirectory, EndData);
+            }
+        }
+
+        /* Compute the new directory size */
+        EndDirectory  = ROUND_UP(EndDirectory, sizeof(ULONG));
+        DirectorySize = (ULONG)(EndDirectory - NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].RVA);
+        DirectorySize = max(DirectorySize, sizeof(IMAGE_EXPORT_DIRECTORY)); // Sanitization.
+
+        OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size =
+         NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size = DirectorySize;
     }
 
 
@@ -1852,7 +1900,7 @@ ProcessPEImage(
     }
 
     /* Resource directory */
-    
+
     /* Exception directory */
 
     /* Security directory */
@@ -1891,7 +1939,7 @@ ProcessPEImage(
         ASSERT(SectionHdr && Directory.Debug);
 
         /*
-         * Heuristically determine whether the debug directory 
+         * Heuristically determine whether the debug directory
          * is of the old format (COFF_DEBUG_DIRECTORY) or the
          * new one (IMAGE_DEBUG_DIRECTORY).
          */
