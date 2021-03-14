@@ -6,20 +6,24 @@
  * COPYRIGHT:   Copyright 2021 Hermès Bélusca-Maïto
  */
 
-#define PROGNAME        "NTPECONV"
-#define VERSION         "0.9a2"
-#define COPYRIGHT_YEARS "2021"
-
 #define _CRT_SECURE_NO_WARNINGS
 #include <stdio.h>
-#include <stdlib.h> // For _countof() -- TODO: Make it compiler-independent.
+// #include <stdlib.h> // For _countof() -- TODO: Make it compiler-independent.
 #include <locale.h> // For setlocale().
 // #include <io.h>
-#include <fcntl.h>
-#include <ctype.h>
+//#include <fcntl.h>
+#include <ctype.h> // For isprint()
 #include <string.h>
+
+/* NT types and PE definitions */
 #include "typedefs.h"
 #include "pecoff.h"
+#include "nt196pe.h"
+
+
+#include "ntpeconv.h"
+#include "pehlp.h"
+
 
 /* Supplemental types */
 typedef char bool;
@@ -28,8 +32,8 @@ typedef char bool;
 
 // #define NULL ((void*)0)
 
-/* Standard page size for i386 */
-#define PAGE_SIZE 0x1000
+// /* Standard page size for i386 */
+// #define PAGE_SIZE 0x1000
 
 
 // #ifdef _PPC_
@@ -43,188 +47,14 @@ typedef char bool;
 // #endif
 
 
-#define RVA(b, m) ((PVOID)((ULONG_PTR)(b) + (ULONG_PTR)(m)))
-
-
-/*
- * These definitions have been extracted from the
- * embedded debug symbols in the \I386\DEBUG\I386KD.EXE
- * executable of the NT Build 1.196 release.
- */
-
-/* The usual IMAGE_DOS_HEADER, but using its "legacy" name */
-typedef struct _IMAGE_DOS_HEADER _DOS_IMAGE_HEADER, DOS_IMAGE_HEADER, *PDOS_IMAGE_HEADER;
-
-/*
- * This structure is the equivalent of the newer
- *
- * typedef struct _IMAGE_DATA_DIRECTORY
- * {
- *     ULONG VirtualAddress;
- *     ULONG Size;
- * } IMAGE_DATA_DIRECTORY, *PIMAGE_DATA_DIRECTORY;
- */
-typedef struct _IMAGE_SPECIAL_DIRECTORY
-{
-    ULONG RVA;
-    ULONG Size;
-} IMAGE_SPECIAL_DIRECTORY, *PIMAGE_SPECIAL_DIRECTORY;
-
-/* The old version of IMAGE_NUMBEROF_DIRECTORY_ENTRIES */
-#define IMAGE_NUMBEROF_SPECIAL_DIRECTORY_ENTRIES 7
-
-// #define IMAGE_NUMBEROF_DIRECTORY_ENTRIES 9 // <-- for the "old" new PE (see ProcessPEImage()).
-
-/*
- * Old NT Subsystems values.
- *
- * These are the values of the IMAGE_HEADER::SubSystem field,
- * that match those mapped from the 'SubSystemType=' option in the
- * CSRSS command line (and stored in the CsrSubSystemType variable).
- * Compare them with the new IMAGE_SUBSYSTEM_xxx ones.
- * Note also that there is no distinction between Windows GUI and CUI.
- */
-#define OLD_IMAGE_SUBSYSTEM_UNKNOWN     0
-#define OLD_IMAGE_SUBSYSTEM_OS2         1
-#define OLD_IMAGE_SUBSYSTEM_WINDOWS     2
-// 3 is undefined
-#define OLD_IMAGE_SUBSYSTEM_NATIVE      4
-#define OLD_IMAGE_SUBSYSTEM_POSIX       5
-
-/*
- * This structure is an old version for the combination of
- * IMAGE_NT_HEADERS + IMAGE_FILE_HEADER + IMAGE_OPTIONAL_HEADER
- */
-typedef struct _IMAGE_HEADER
-{
-    ULONG  SignatureBytes;
-    UCHAR  Endian;
-    UCHAR  Reserved1;
-    USHORT CPUType;
-    USHORT OSType;
-    USHORT SubSystem;
-    USHORT OSMajor;
-    USHORT OSMinor;
-    USHORT LinkerMajor;
-    USHORT LinkerMinor;
-    USHORT UserMajor;
-    USHORT UserMinor;
-    ULONG  ModuleFlags;
-    ULONG  Reserved2;
-    ULONG  FileCheckSum;
-    ULONG  EntryPointRVA;
-    ULONG  ImageBase;
-    ULONG  ImageSize;
-    ULONG  HeaderSize;
-    ULONG  FileAlign;
-    ULONG  PageSize;
-    ULONG  TimeStamp;
-    ULONG  StackReserve;
-    ULONG  StackCommit;
-    ULONG  HeapReserve;
-    ULONG  HeapCommit;
-    ULONG  NumberOfObjects;
-    ULONG  ObjectTableRVA;
-    ULONG  NumberOfDirectives;
-    ULONG  DirectiveTableRVA;
-    ULONG  Reserved3;
-    ULONG  Reserved4;
-    ULONG  Reserved5;
-    ULONG  NumberOfSpecialRVAs;
-    IMAGE_SPECIAL_DIRECTORY DataDirectory[IMAGE_NUMBEROF_SPECIAL_DIRECTORY_ENTRIES];
-    /*
-     * These are the first 9 PE directories:
-     * Export               IMAGE_DIRECTORY_ENTRY_EXPORT
-     * Import               IMAGE_DIRECTORY_ENTRY_IMPORT
-     * Resource             IMAGE_DIRECTORY_ENTRY_RESOURCE
-     * Exception            IMAGE_DIRECTORY_ENTRY_EXCEPTION
-     * Security             IMAGE_DIRECTORY_ENTRY_SECURITY
-     * Relocations          IMAGE_DIRECTORY_ENTRY_BASERELOC
-     * Debug                IMAGE_DIRECTORY_ENTRY_DEBUG
-     * ImageDescription     IMAGE_DIRECTORY_ENTRY_COPYRIGHT (x86-specific) / IMAGE_DIRECTORY_ENTRY_ARCHITECTURE
-     * MachineSpecific      IMAGE_DIRECTORY_ENTRY_GLOBALPTR
-     */
-} IMAGE_HEADER, *PIMAGE_HEADER;
-
-/*
- * This structure is an old version of
- * the newer IMAGE_SECTION_HEADER.
- */
-typedef struct _IMAGE_OBJECT_HEADER
-{
-    ULONG RVA;
-    ULONG VirtualSize;
-    ULONG SeekOffset;
-    ULONG OnDiskSize;
-    ULONG ObjectFlags;
-    ULONG Reserved;
-} IMAGE_OBJECT_HEADER, *PIMAGE_OBJECT_HEADER;
-
-/*
- * This structure can be viewed as an old version
- * of the newer IMAGE_DEBUG_DIRECTORY.
- */
-typedef struct _COFF_DEBUG_DIRECTORY
-{
-    ULONG Characteristics;
-    ULONG VersionStamp;
-    ULONG SizeOfData;
-    ULONG Type;
-    ULONG AddressOfRawData;
-    ULONG PointerToRawData;
-} COFF_DEBUG_DIRECTORY, *PCOFF_DEBUG_DIRECTORY;
-
-
-/*
- * VOID
- * __cdecl
- * PrintWarning(
- *     IN PCSTR ErrorFmt,
- *      ...);
- */
-#define PrintWarning(WarningFmt, ...) \
-    fprintf(stdout, PROGNAME ": " WarningFmt, ##__VA_ARGS__)
-
-/*
- * VOID
- * __cdecl
- * PrintError(
- *     IN PCSTR ErrorFmt,
- *      ...);
- */
-#define PrintError(ErrorFmt, ...) \
-    fprintf(stderr, PROGNAME ": " ErrorFmt, ##__VA_ARGS__)
-
-typedef enum _ERROR_TYPE
-{
-    ErrorInvalidPE = 0,
-    ErrorMalformedPE,
-    ErrorUnsupportedPE,
-    ErrorTypeMax
-} ERROR_TYPE;
-
-static PCSTR Errors[] =
+/* For the PrintErrorReason() macro */
+PCSTR Errors[ErrorTypeMax + 1] =
 {
     "Not a valid PE image!",
     "Malformed PE image!",
     "Unsupported PE image!",
     "Unknown"
 };
-
-/*
- * VOID
- * __cdecl
- * PrintErrorReason(
- *     IN ERROR_TYPE ErrorType,
- *     IN PCSTR Reason,
- *      ...);
- */
-#define PrintErrorReason(ErrorType, Reason, ...)    \
-do { \
-    C_ASSERT((ErrorType) <= ErrorTypeMax);          \
-    PrintError("%s (" Reason ")\n",                 \
-               Errors[ErrorType], ##__VA_ARGS__);   \
-} while (0)
 
 
 #define _VAR_AS_PUCHAR(var)     ((PUCHAR)&(var))
@@ -538,7 +368,6 @@ ParseOldPEImage(
     PDOS_IMAGE_HEADER DosHeader = NULL;
     PIMAGE_HEADER NtHeader = NULL;
     PIMAGE_OBJECT_HEADER ObjTable = NULL;
-    PVOID ptr;
     ULONG NtHeaderOffset;
     size_t NtHeaderSize;
     size_t TotalHeadersSize = 0;
@@ -608,7 +437,7 @@ ParseOldPEImage(
     }
 
     /* Allocate memory for the old NT PE header (excepting the Data directory)
-     * and load it (it will be reallocated later to accomodate for the extra
+     * and load it (it will be re-allocated later to accomodate for the extra
      * directory array and the object/sections table). */
     NtHeader = malloc(NtHeaderSize);
     if (!NtHeader)
@@ -757,8 +586,8 @@ ParseOldPEImage(
      */
     if (NtHeaderSize > (size_t)FIELD_OFFSET(IMAGE_HEADER, DataDirectory))
     {
-        /* Reallocate the NT PE header to accomodate for the Data directory array and the object table */
-        ptr = realloc(NtHeader, NtHeaderSize);
+        /* Re-allocate the NT PE header to accomodate for the Data directory array and the object table */
+        PVOID ptr = realloc(NtHeader, NtHeaderSize);
         if (!ptr)
         {
             PrintError("Failed to re-allocate %lu bytes\n", (ULONG)NtHeaderSize);
@@ -901,7 +730,7 @@ ParseNewPEImage(
     // *pNtHeader = (PIMAGE_HEADER)RVA(pData, NtHeaderOffset);
 
     /* Allocate memory for the old NT PE header and load it (it will be
-     * reallocated later to accomodate for the extra object/sections and
+     * re-allocated later to accomodate for the extra object/sections and
      * directive arrays). */
     NtHeader = malloc(sizeof(IMAGE_HEADER));
     if (!NtHeader)
@@ -980,207 +809,110 @@ Failure:
 #endif
 
 
-/**
- * @brief   Loads the contents of a section from a file.
- *          The description of the section is passed via SectionHdr.
- *          The function returns a pointer to the allocated section,
- *          or NULL in case of failure. This pointer must be freed
- *          by the caller after usage.
- *          Returns TRUE if success, FALSE otherwise.
- **/
-static BOOLEAN
-LoadSectionFromFile(
-    IN FILE* pImageFile,
-    IN PIMAGE_OBJECT_HEADER SectionHdr,
-    OUT PVOID* pSection,
-    OUT PULONG pSectionSize OPTIONAL)
+bool
+IsZeroMemory(
+    IN const void UNALIGNED *Buffer,
+    IN size_t Size)
 {
-    PVOID Section;     // Allocated section.
-    ULONG SectionSize; // The size of the allocated section.
+/*
+#pragma intrinsic(_BitScanForward)
+i = 0; _BitScanForward(&i, addr); i = 1 << i; i = min(i, sizeof(uint64_t));
+ */
+#define GET_ALIGNMENT(addr) \
+    !((ULONG_PTR)(addr) & (sizeof(uint64_t) - 1)) ? sizeof(uint64_t) : \
+    !((ULONG_PTR)(addr) & (sizeof(uint32_t) - 1)) ? sizeof(uint32_t) : \
+    !((ULONG_PTR)(addr) & (sizeof(uint16_t) - 1)) ? sizeof(uint16_t) : sizeof(uint8_t)
+ // !((ULONG_PTR)(addr) & (sizeof(uint8_t)  - 1)) ? sizeof(uint8_t)  : 0
 
-    *pSection = NULL;
-    if (pSectionSize)
-        *pSectionSize = 0;
+#if 0
 
-    /*
-     * NOTE: It sometimes happens for the "old" new PEs that the VirtualSize
-     * is zero, while the OnDiskSize is not, and the section contains actual
-     * data. Therefore we don't truncate the size but instead take the max.
-     */
-    SectionSize = max(SectionHdr->VirtualSize, SectionHdr->OnDiskSize);
-
-    /* Allocate the section and load it from the file */
-    Section = malloc(SectionSize);
-    if (!Section)
+    // size_t align;
+    while (Size)
     {
-        PrintError("Could not load the section!\n");
-        return FALSE;
-    }
-
-    /* Load it */
-    fseek(pImageFile, SectionHdr->SeekOffset, SEEK_SET);
-    if (!fread(Section, SectionHdr->OnDiskSize, 1, pImageFile))
-    {
-        PrintError("Failed to read %lu bytes from source file\n", SectionHdr->OnDiskSize);
-        free(Section);
-        return FALSE;
-    }
-    /* Size of data is less than the virtual size: zero out the slack space */
-    if (SectionHdr->OnDiskSize < SectionSize)
-    {
-        RtlZeroMemory(RVA(Section, SectionHdr->OnDiskSize),
-                      SectionSize - SectionHdr->OnDiskSize);
-    }
-
-    *pSection = Section;
-    if (pSectionSize)
-        *pSectionSize = SectionSize;
-    return TRUE;
-}
-
-/**
- * @brief   Retrieves the data of a directory entry, allocating
- *          and loading its corresponding section.
- *          The function returns a pointer to the allocated section,
- *          or NULL in case of failure. This pointer must be freed
- *          by the caller after usage.
- *          Pointers to the directory data, its size, to the section
- *          header in the section table, and the section size, are
- *          returned as well.
- *
- * NOTE: This function is similar to a combined action of
- * RtlImageDirectoryEntryToData() and RtlImageRvaToSection().
- **/
-static PVOID
-LoadDirectoryEntryAndSection(
-    IN FILE* pImageFile,
-    IN PIMAGE_HEADER NtHeader,
-    IN USHORT Directory,
-    OUT PVOID* DirectoryData,
-    OUT PULONG Size OPTIONAL,
-    OUT PIMAGE_OBJECT_HEADER* pSectionHdr OPTIONAL,
-    OUT PULONG pSectionSize OPTIONAL)
-{
-    PIMAGE_SPECIAL_DIRECTORY DirectoryEntry;
-    PIMAGE_OBJECT_HEADER ObjTable = NULL;
-    PIMAGE_OBJECT_HEADER SectionHdr;
-    PVOID Section;         // Allocated section.
-    ULONG SectionSize = 0; // The size of the allocated section.
-    ULONG i;
-
-    *DirectoryData = NULL;
-    if (Size)
-        *Size = 0;
-
-    if (pSectionHdr)
-        *pSectionHdr = NULL;
-    if (pSectionSize)
-        *pSectionSize = 0;
-
-    if (Directory >= NtHeader->NumberOfSpecialRVAs)
-        return NULL;
-
-    DirectoryEntry = &NtHeader->DataDirectory[Directory];
-    if (DirectoryEntry->RVA == 0)
-        return NULL;
-    if (DirectoryEntry->Size == 0)
-        return NULL;
-
-    /* Get a pointer to the object table; the ObjectTableRVA has been already
-     * adjusted so that it systematically points just after the structure. */
-    if (NtHeader->ObjectTableRVA)
-    {
-        ASSERT(NtHeader->NumberOfObjects);
-        ObjTable = RVA(NtHeader, NtHeader->ObjectTableRVA);
-    }
-    else
-    {
-        /* No section available */
-        return NULL;
-    }
-
-    /* Find its corresponding section */
-    SectionHdr = NULL;
-    for (i = 0; i < NtHeader->NumberOfObjects; ++i)
-    {
-        if ((ObjTable[i].RVA <= DirectoryEntry->RVA) &&
-            (DirectoryEntry->RVA < ObjTable[i].RVA + ObjTable[i].VirtualSize))
+        switch (/*align =*/ GET_ALIGNMENT(Buffer))
         {
-            /* Found it */
-            SectionHdr = &ObjTable[i];
-            break;
+        case sizeof(uint64_t) :
+            while (Size >= sizeof(uint64_t))
+            {
+                if (*(uint64_t*)Buffer != 0ULL)
+                    return false;
+                Buffer = (void*)((size_t)Buffer + sizeof(uint64_t));
+                Size -= sizeof(uint64_t);
+            }
+            // break;
+        case sizeof(uint32_t) :
+            // if (Size >= sizeof(uint32_t))
+            if (Size >> 2) // Size / sizeof(uint32_t)
+            {
+                if (*(uint32_t*)Buffer != 0UL)
+                    return false;
+                Buffer = (void*)((size_t)Buffer + sizeof(uint32_t));
+                Size -= sizeof(uint32_t);
+                // break;
+            }
+            /* Fallback */
+        case sizeof(uint16_t) :
+            // if (Size >= sizeof(uint16_t))
+            if (Size >> 1) // Size / sizeof(uint16_t)
+            {
+                if (*(uint16_t*)Buffer != 0)
+                    return false;
+                Buffer = (void*)((size_t)Buffer + sizeof(uint16_t));
+                Size -= sizeof(uint16_t);
+                // break;
+            }
+            /* Fallback */
+        case sizeof(uint8_t) :
+            if (Size >= sizeof(uint8_t))
+            {
+                if (*(uint8_t*)Buffer != 0)
+                    return false;
+                Buffer = (void*)((size_t)Buffer + sizeof(uint8_t));
+                Size -= sizeof(uint8_t);
+                // break;
+            }
         }
     }
 
-    /* If none found, bail out */
-    if (!SectionHdr)
-        return NULL;
+#else
 
-    if (pSectionHdr)
-        *pSectionHdr = SectionHdr;
-
-    /*
-     * NOTE: It sometimes happens for the "old" new PEs that the VirtualSize
-     * is zero, while the OnDiskSize is not, and the section contains actual
-     * data. Therefore we don't truncate the size but instead take the max.
-     */
-    SectionSize = max(SectionHdr->VirtualSize, SectionHdr->OnDiskSize);
-
-    /* Sanity check: Check that the directory data is
-     * fully contained in the section, otherwise bail out. */
-    if ( !((SectionHdr->RVA <= DirectoryEntry->RVA) &&
-           (DirectoryEntry->RVA + DirectoryEntry->Size < SectionHdr->RVA + SectionSize)) )
+    while (Size)
     {
-        /* Nope */
-        return NULL;
+        if ((Size >= sizeof(uint64_t)) && IS_ALIGNED(Buffer, sizeof(uint64_t)))
+        {
+            if (*(uint64_t*)Buffer != 0ULL)
+                return false;
+            Buffer = (void*)((size_t)Buffer + sizeof(uint64_t));
+            Size -= sizeof(uint64_t);
+        }
+        else if ((Size >= sizeof(uint32_t)) && IS_ALIGNED(Buffer, sizeof(uint32_t)))
+        {
+            if (*(uint32_t*)Buffer != 0UL)
+                return false;
+            Buffer = (void*)((size_t)Buffer + sizeof(uint32_t));
+            Size -= sizeof(uint32_t);
+        }
+        else if ((Size >= sizeof(uint16_t)) && IS_ALIGNED(Buffer, sizeof(uint16_t)))
+        {
+            if (*(uint16_t*)Buffer != 0)
+                return false;
+            Buffer = (void*)((size_t)Buffer + sizeof(uint16_t));
+            Size -= sizeof(uint16_t);
+        }
+        else if (Size >= sizeof(uint8_t)) // && IS_ALIGNED(Buffer, sizeof(uint8_t)))
+        {
+            if (*(uint8_t*)Buffer != 0)
+                return false;
+            Buffer = (void*)((size_t)Buffer + sizeof(uint8_t));
+            Size -= sizeof(uint8_t);
+        }
     }
 
-    /* Finally load the section */
-    if (!LoadSectionFromFile(pImageFile,
-                             SectionHdr,
-                             &Section,
-                             &SectionSize))
-    {
-        /* Fail - No need to display errors since
-         * LoadSectionFromFile() does that already. */
-        return NULL;
-    }
+#endif
 
-    /* The directory data points inside the section */
-    ASSERT(SectionHdr->RVA <= DirectoryEntry->RVA);
-    *DirectoryData = RVA(Section, DirectoryEntry->RVA - SectionHdr->RVA);
-    if (Size)
-        *Size = DirectoryEntry->Size;
+    return true;
 
-    /* Return a pointer to the allocated section */
-    if (pSectionSize)
-        *pSectionSize = SectionSize;
-    return Section;
-}
-
-/**
- * @brief   Flushes the contents of a section to a file.
- *          The description of the section is passed via SectionHdr;
- *          the data of the section is passed in the Section buffer.
- *          Returns TRUE if success, FALSE otherwise.
- *
- * IMPORTANT NOTE: The section data written to the file is truncated
- * to the value stored in SectionHdr->OnDiskSize.
- **/
-static BOOLEAN
-FlushSectionToFile(
-    IN FILE* pImageFile,
-    IN PIMAGE_OBJECT_HEADER SectionHdr,
-    IN PVOID Section)
-{
-    fseek(pImageFile, SectionHdr->SeekOffset, SEEK_SET);
-    if (!fwrite(Section, SectionHdr->OnDiskSize, 1, pImageFile))
-    {
-        PrintError("Failed to write %lu bytes to destination file\n", SectionHdr->OnDiskSize);
-        return FALSE;
-    }
-    fflush(pImageFile);
-    return TRUE;
+#undef GET_ALIGNMENT
 }
 
 
@@ -1200,7 +932,8 @@ ProcessPEImage(
     IN ULONG NtHeaderSize)
 {
     PIMAGE_OBJECT_HEADER ObjTable = NULL;
-    PIMAGE_NT_HEADERS32 NtHeaders = NULL;
+    PIMAGE_SECTION_HEADER SectionTable = NULL; // The converted object/section table.
+    PIMAGE_NT_HEADERS32 NtHeaders;
     PIMAGE_FILE_HEADER FileHeader;
     PIMAGE_OPTIONAL_HEADER32 OptHeader;
     USHORT SizeOfOptionalHeader;
@@ -1218,6 +951,7 @@ ProcessPEImage(
     PIMAGE_OBJECT_HEADER SectionHdr = NULL; // Section header in the sections list.
     PVOID Section;         // Allocated section.
     ULONG SectionSize = 0; // The size of the allocated section.
+    PULONG ExportTable = NULL;
 
     C_ASSERT(sizeof(IMAGE_OPTIONAL_HEADER32) == 0xE0);
     C_ASSERT(FIELD_OFFSET(IMAGE_OPTIONAL_HEADER32, DataDirectory) == 0x60);
@@ -1400,13 +1134,13 @@ ProcessPEImage(
      * Fetch the export table now, as we may need it later,
      * and perform old-PE fixups of the exports directory.
      */
-    Section = LoadDirectoryEntryAndSection(pImageFile,
-                                           NtHeader,
-                                           IMAGE_DIRECTORY_ENTRY_EXPORT,
-                                           &Directory.Export,
-                                           &DirectorySize,
-                                           &SectionHdr,
-                                           &SectionSize);
+    Section = LoadOldPEDirectoryEntryAndSection(pImageFile,
+                                                NtHeader,
+                                                IMAGE_DIRECTORY_ENTRY_EXPORT,
+                                                &Directory.Export,
+                                                &DirectorySize,
+                                                &SectionHdr,
+                                                &SectionSize);
 #if 0
     if (!SectionHdr)
         PrintWarning("WARNING: Could not load the export directory, ignoring...\n");
@@ -1415,399 +1149,64 @@ ProcessPEImage(
 #endif
     if (Section && Directory.Export)
     {
-        PULONG NamesTable = NULL;
-        size_t TableSize;
-        ULONG_PTR EndData, EndDirectory;
-        PSTR StringPtr;
-        ULONG i;
+        ULONG_PTR EndDirectory;
+        size_t ExportTableSize;
 
         ASSERT(SectionHdr);
 
-        /* In old-PE style, these RVAs are from the beginning of the
-         * export section. Convert them to RVAs from the base of the image. */
-        Directory.Export->Name += SectionHdr->RVA;
-        Directory.Export->AddressOfFunctions += SectionHdr->RVA;
-        Directory.Export->AddressOfNames += SectionHdr->RVA;
-        Directory.Export->AddressOfNameOrdinals += SectionHdr->RVA;
+        FixupExportsSectionWorker(Directory.Export,
+                                  DirectorySize,
+                                  SectionHdr->RVA,
+                                  SectionSize,
+                                  Section,
+                                  &EndDirectory);
 
-        TableSize = Directory.Export->NumberOfNames * sizeof(ULONG);
-
-        /* Sanity check: Check that the export function table is
-         * fully contained in the section, otherwise bail out. */
-        if ( !((SectionHdr->RVA <= Directory.Export->AddressOfNames) &&
-               (Directory.Export->AddressOfNames + TableSize < SectionHdr->RVA + SectionSize)) )
-        {
-            /* Nope */
-            PrintWarning("WARNING: Could not load the export names table, ignoring...\n");
-        }
-        else
-        {
-            /* The export table points inside the export section */
-            ASSERT(SectionHdr->RVA <= Directory.Export->AddressOfNames);
-            NamesTable = RVA(Section, Directory.Export->AddressOfNames - SectionHdr->RVA);
-
-            /* In old-PE style, these RVAs are from the beginning of the
-             * export section. Convert them to RVAs from the base of the image. */
-            for (i = 0; i < Directory.Export->NumberOfNames; ++i)
-            {
-                NamesTable[i] += SectionHdr->RVA;
-            }
-        }
-
-        /*
-         * In later-PE style, the reported size of the export directory counts
-         * the size of all the primary data (sizeof(IMAGE_EXPORT_DIRECTORY))
-         * **PLUS** the size of all the data from the tables, and not just
-         * sizeof(IMAGE_EXPORT_DIRECTORY) as in the old-PE format.
-         * The "new"-PE style from October 1991 builds does not do that yet,
-         * and therefore some modern tools (e.g. IDA) will complain about the
-         * number of reported exports v.s. some "limit" calculated via the
-         * reported export directory size.
-         */
-        if (DirectorySize != sizeof(IMAGE_EXPORT_DIRECTORY))
-        {
-            PrintWarning("WARNING: Unexpected old-PE EXPORT directory size %ld, expected %ld\n",
-                         DirectorySize, (ULONG)sizeof(IMAGE_EXPORT_DIRECTORY));
-        }
-        /*
-         * Re-calculate the size of the directory.
-         * To do this we find/calculate the maximum possible RVA value
-         * from all the data pointed by the directory.
-         */
-        EndDirectory = 0;
-
-        /* AddressOfFunctions table */
-        TableSize = Directory.Export->NumberOfFunctions * sizeof(ULONG);
-        EndData = Directory.Export->AddressOfFunctions + TableSize;
-        EndDirectory = max(EndDirectory, EndData);
-
-        /* AddressOfNames table */
-        TableSize = Directory.Export->NumberOfNames * sizeof(ULONG);
-        EndData = Directory.Export->AddressOfNames + TableSize;
-        EndDirectory = max(EndDirectory, EndData);
-
-        /* AddressOfNameOrdinals table */
-        EndData = Directory.Export->AddressOfNameOrdinals + TableSize;
-        EndDirectory = max(EndDirectory, EndData);
-
-        /* Name string */
-        StringPtr = RVA(Section, Directory.Export->Name - SectionHdr->RVA);
-        // strnlen(StringPtr, SectionSize - (Directory.Export->Name - SectionHdr->RVA));
-        EndData = Directory.Export->Name + (strlen(StringPtr) + 1) * sizeof(CHAR);
-        EndDirectory = max(EndDirectory, EndData);
-
-        /* Browse the Names table */
-        if (NamesTable)
-        {
-            for (i = 0; i < Directory.Export->NumberOfNames; ++i)
-            {
-                StringPtr = RVA(Section, NamesTable[i] - SectionHdr->RVA);
-                // strnlen(StringPtr, SectionSize - (NamesTable[i] - SectionHdr->RVA));
-                EndData = NamesTable[i] + (strlen(StringPtr) + 1) * sizeof(CHAR);
-                EndDirectory = max(EndDirectory, EndData);
-            }
-        }
-
-        /* Compute the new directory size */
+        //
+        // TODO: Find a nice way to move the code below into the worker as PE-independent format.
+        //
+        /* Compute the new directory size and modify the directory entry */
         EndDirectory  = ROUND_UP(EndDirectory, sizeof(ULONG));
         DirectorySize = (ULONG)(EndDirectory - NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].RVA);
         DirectorySize = max(DirectorySize, sizeof(IMAGE_EXPORT_DIRECTORY)); // Sanitization.
 
         OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size =
          NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size = DirectorySize;
-    }
 
 
-    /*
-     * Convert the object/section table and initialize the remaining fields.
-     */
-    OptHeader->BaseOfCode = ULONG_MAX; // Will be normalized later.
-    OptHeader->SizeOfCode = 0;
-    OptHeader->BaseOfData = ULONG_MAX; // Will be normalized later.
-    OptHeader->SizeOfInitializedData   = 0;
-    OptHeader->SizeOfUninitializedData = 0;
+        ExportTableSize = Directory.Export->NumberOfFunctions * sizeof(ULONG);
 
-    if (ObjTable)
-    {
-        /* This table comes from https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#special-sections */
-        static const struct
+        /* Sanity check: Check that the export function table is
+         * fully contained in the section, otherwise bail out. */
+        if ( !((SectionHdr->RVA <= Directory.Export->AddressOfFunctions) &&
+               (Directory.Export->AddressOfFunctions + ExportTableSize < SectionHdr->RVA + SectionSize)) )
         {
-            PCSTR SectionName;
-            ULONG Characteristics;
-        } SectionFlags[] =
-        {
-            /* Sorted by usual order of appearance in PE images */
-            { ".text"   , IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ },
-            { ".rdata"  , IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ },
-         // { ".srdata" , IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ /* | IMAGE _SCN_GPREL */ },
-            { ".data"   , IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE },
-         // { ".sdata"  , IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE /* | IMAGE _SCN_GPREL */ },
-         // { ".sbss"   , IMAGE_SCN_CNT_UNINITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE /* | IMAGE _SCN_GPREL */ },
-            { ".bss"    , IMAGE_SCN_CNT_UNINITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE },
-            { ".edata"  , IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ },
-            { ".idata"  , IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE },
-            { ".xdata"  , IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ },
-            { ".pdata"  , IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ },
-            { ".rsrc"   , IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ },
-            { ".reloc"  , IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_DISCARDABLE },
-            { ".debug"  , IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_DISCARDABLE }
-        };
-#define SECTION_FLAGS_TEXT   0
-#define SECTION_FLAGS_RDATA  1
-// #define SECTION_FLAGS_SRDATA 2
-#define SECTION_FLAGS_DATA   2
-// #define SECTION_FLAGS_SDATA  3
-// #define SECTION_FLAGS_SBSS   3
-#define SECTION_FLAGS_BSS    3
-#define SECTION_FLAGS_EDATA  4
-#define SECTION_FLAGS_IDATA  5
-#define SECTION_FLAGS_XDATA  6
-#define SECTION_FLAGS_PDATA  7
-#define SECTION_FLAGS_RSRC   8
-#define SECTION_FLAGS_RELOC  9
-#define SECTION_FLAGS_DEBUG  10
-
-        PIMAGE_SECTION_HEADER SectionTable;
-        PCSTR SectionName;
-        ULONG Characteristics;
-        ULONG i, j;
-
-        PULONG ExportTable = NULL;
-
-        if (Section && Directory.Export)
-        {
-            size_t ExportTableSize = Directory.Export->NumberOfFunctions * sizeof(ULONG);
-
-            ASSERT(SectionHdr);
-
-            /* Sanity check: Check that the export function table is
-             * fully contained in the section, otherwise bail out. */
-            if ( !((SectionHdr->RVA <= Directory.Export->AddressOfFunctions) &&
-                   (Directory.Export->AddressOfFunctions + ExportTableSize < SectionHdr->RVA + SectionSize)) )
-            {
-                /* Nope */
-                PrintWarning("WARNING: Could not load the export table, ignoring...\n");
-            }
-            else
-            {
-                /* The export table points inside the export section */
-                ASSERT(SectionHdr->RVA <= Directory.Export->AddressOfFunctions);
-                ExportTable = RVA(Section, Directory.Export->AddressOfFunctions - SectionHdr->RVA);
-            }
+            /* Nope */
+            PrintWarning("WARNING: Could not load the export table, ignoring...\n");
         }
-
-        printf("Reconstructed Sections:\n"
-               "=======================\n");
-
-        SectionTable = RVA(FileHeader + 1, FileHeader->SizeOfOptionalHeader);
-        for (i = 0; i < NtHeader->NumberOfObjects; ++i)
+        else
         {
-            /*
-             * Deduce the best section name, based on:
-             * - the presence of data, within the current section, pointed by the DataDirectory entries;
-             * - the section attributes;
-             * - ... ?
-             */
-            SectionName     = NULL;
-            Characteristics = 0;
-
-            // INVESTIGATE: Can we deduce the characteristics
-            // from ObjTable[i].ObjectFlags as well?
-
-            /* Is this section a possible .bss section? */
-            if (ObjTable[i].VirtualSize == 0 || ObjTable[i].OnDiskSize == 0 /* || ObjTable[i].SeekOffset == 0 */)
-            {
-                SectionName     = SectionFlags[SECTION_FLAGS_BSS].SectionName;
-                Characteristics = SectionFlags[SECTION_FLAGS_BSS].Characteristics;
-            }
-            /* Or a .text section, if the entry point is in it */
-            else if ((ObjTable[i].RVA <= NtHeader->EntryPointRVA) &&
-                     (NtHeader->EntryPointRVA < ObjTable[i].RVA + ObjTable[i].VirtualSize))
-            {
-                SectionName     = SectionFlags[SECTION_FLAGS_TEXT].SectionName;
-                Characteristics = SectionFlags[SECTION_FLAGS_TEXT].Characteristics;
-            }
-            else
-            {
-                /* Find whether a directory entry is stored within the current section */
-                for (j = 0; j < NtHeader->NumberOfSpecialRVAs; ++j)
-                {
-                    /* Ignore empty directory entries */
-                    if ((NtHeader->DataDirectory[j].RVA == 0) ||
-                        (NtHeader->DataDirectory[j].Size == 0))
-                    {
-                        continue;
-                    }
-
-                    if ((ObjTable[i].RVA <= NtHeader->DataDirectory[j].RVA) &&
-                        (NtHeader->DataDirectory[j].RVA < ObjTable[i].RVA + ObjTable[i].VirtualSize))
-                    {
-                        /* Found a candidate */
-                        break;
-                    }
-                }
-
-                if (j < NtHeader->NumberOfSpecialRVAs)
-                {
-                    if (j == IMAGE_DIRECTORY_ENTRY_EXPORT)
-                    {
-                        // SectionName     = ".EXPORTS";
-                        SectionName     = SectionFlags[SECTION_FLAGS_EDATA].SectionName;
-                        Characteristics = SectionFlags[SECTION_FLAGS_EDATA].Characteristics;
-                    }
-                    else if (j == IMAGE_DIRECTORY_ENTRY_IMPORT)
-                    {
-                        SectionName     = SectionFlags[SECTION_FLAGS_IDATA].SectionName;
-                        Characteristics = SectionFlags[SECTION_FLAGS_IDATA].Characteristics;
-                    }
-                    else if (j == IMAGE_DIRECTORY_ENTRY_RESOURCE)
-                    {
-                        SectionName     = SectionFlags[SECTION_FLAGS_RSRC].SectionName;
-                        Characteristics = SectionFlags[SECTION_FLAGS_RSRC].Characteristics;
-                    }
-                    else if (j == IMAGE_DIRECTORY_ENTRY_EXCEPTION)
-                    {
-                        SectionName     = SectionFlags[SECTION_FLAGS_PDATA].SectionName;
-                        Characteristics = SectionFlags[SECTION_FLAGS_PDATA].Characteristics;
-                    }
-                    else if (j == IMAGE_DIRECTORY_ENTRY_SECURITY)
-                    {
-                        /* Usually in .rdata */
-                        SectionName     = SectionFlags[SECTION_FLAGS_RDATA].SectionName;
-                        Characteristics = SectionFlags[SECTION_FLAGS_RDATA].Characteristics;
-                    }
-                    else if (j == IMAGE_DIRECTORY_ENTRY_BASERELOC)
-                    {
-                        SectionName     = SectionFlags[SECTION_FLAGS_RELOC].SectionName;
-                        Characteristics = SectionFlags[SECTION_FLAGS_RELOC].Characteristics;
-                    }
-                    /* WARNING: The debug directory itself may NOT be in the .debug section!!!! */
-                    else if (j == IMAGE_DIRECTORY_ENTRY_DEBUG)
-                    {
-                        SectionName     = SectionFlags[SECTION_FLAGS_DEBUG].SectionName;
-                        Characteristics = SectionFlags[SECTION_FLAGS_DEBUG].Characteristics;
-                    }
-                    // else if (j == IMAGE_DIRECTORY_ENTRY_ARCHITECTURE) // same as IMAGE_DIRECTORY_ENTRY_COPYRIGHT
-                    //     SectionName = NULL;
-                    // else if (j == IMAGE_DIRECTORY_ENTRY_GLOBALPTR)
-                    //     SectionName = NULL;
-                    // else if (j == IMAGE_DIRECTORY_ENTRY_TLS)
-                    //     SectionName = ".tls";
-                    else
-                    {
-                        /* Fall back to initialized data characteristics for unknown directory */
-                        Characteristics = SectionFlags[SECTION_FLAGS_DATA].Characteristics;
-                    }
-                }
-            }
-
-            if (Characteristics == 0)
-            {
-                /* Nothing so far */
-
-                /* Enumerate all the exports and check whether any of these are in the section.
-                 * If this is so, we have a code section. (**NOTE**: We don't consider data exports!) */
-                if (Directory.Export && ExportTable)
-                {
-                    ULONG Ordinal;
-                    for (Ordinal = 0; Ordinal < Directory.Export->NumberOfFunctions; ++Ordinal)
-                    {
-                        if ((ObjTable[i].RVA <= ExportTable[Ordinal]) &&
-                            (ExportTable[Ordinal] < ObjTable[i].RVA + ObjTable[i].VirtualSize))
-                        {
-                            SectionName     = SectionFlags[SECTION_FLAGS_TEXT].SectionName;
-                            Characteristics = SectionFlags[SECTION_FLAGS_TEXT].Characteristics;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (Characteristics == 0)
-            {
-                /* Still nothing, fall back to data characteristics */
-                Characteristics = SectionFlags[SECTION_FLAGS_DATA].Characteristics;
-            }
-
-
-            if (SectionName)
-            {
-                strncpy((char*)SectionTable[i].Name, SectionName, RTL_NUMBER_OF(SectionTable[i].Name));
-            }
-            else
-            {
-                /* If we still haven't determined the section name, give it one based on its index */
-                char tmpSectName[RTL_NUMBER_OF(SectionTable[i].Name) + 1];
-                snprintf(tmpSectName, RTL_NUMBER_OF(tmpSectName), ".sect%03u", i);
-                strncpy((char*)SectionTable[i].Name, tmpSectName, RTL_NUMBER_OF(SectionTable[i].Name));
-            }
-
-
-            if (Characteristics & IMAGE_SCN_CNT_CODE)
-            {
-                OptHeader->BaseOfCode = min(OptHeader->BaseOfCode, ObjTable[i].RVA);
-                /* Sum of all .text-type sections */
-                OptHeader->SizeOfCode += ObjTable[i].OnDiskSize;
-            }
-            else if (Characteristics & IMAGE_SCN_CNT_INITIALIZED_DATA)
-            {
-                OptHeader->BaseOfData = min(OptHeader->BaseOfData, ObjTable[i].RVA);
-                /* Sum of all sections other than .text and .bss */
-                OptHeader->SizeOfInitializedData += ObjTable[i].OnDiskSize;
-            }
-            else if (Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA)
-            {
-                OptHeader->BaseOfData = min(OptHeader->BaseOfData, ObjTable[i].RVA);
-                /* Sum of all .bss-type sections */
-                OptHeader->SizeOfUninitializedData += max(ObjTable[i].VirtualSize, ObjTable[i].OnDiskSize);
-            }
-
-
-            SectionTable[i].Misc.VirtualSize     = ObjTable[i].VirtualSize;
-            SectionTable[i].VirtualAddress       = ObjTable[i].RVA;
-            SectionTable[i].SizeOfRawData        = ObjTable[i].OnDiskSize;
-            SectionTable[i].PointerToRawData     = ObjTable[i].SeekOffset;
-            SectionTable[i].PointerToRelocations = 0; // FIXME?
-            SectionTable[i].PointerToLinenumbers = 0;
-            SectionTable[i].NumberOfRelocations  = 0; // FIXME?
-            SectionTable[i].NumberOfLinenumbers  = 0;
-            SectionTable[i].Characteristics      = Characteristics;
-
-            printf("[%lu] -->\n"
-                   "    Name                 = '%.*s'\n"
-                   "    Misc.VirtualSize     = 0x%08X\n"
-                   "    VirtualAddress       = 0x%08X\n"
-                   "    SizeOfRawData        = 0x%08X\n"
-                   "    PointerToRawData     = 0x%08X\n"
-                   "    PointerToRelocations = 0x%08X\n"
-                   "    PointerToLinenumbers = 0x%08X\n"
-                   "    NumberOfRelocations  = 0x%04X\n"
-                   "    NumberOfLinenumbers  = 0x%04X\n"
-                   "    Characteristics      = 0x%08X\n",
-                   i,
-                   (ULONG)RTL_NUMBER_OF(SectionTable[i].Name), SectionTable[i].Name,
-                   SectionTable[i].Misc.VirtualSize,
-                   SectionTable[i].VirtualAddress,
-                   SectionTable[i].SizeOfRawData,
-                   SectionTable[i].PointerToRawData,
-                   SectionTable[i].PointerToRelocations,
-                   SectionTable[i].PointerToLinenumbers,
-                   SectionTable[i].NumberOfRelocations,
-                   SectionTable[i].NumberOfLinenumbers,
-                   SectionTable[i].Characteristics);
+            /* The export table points inside the export section */
+            ASSERT(SectionHdr->RVA <= Directory.Export->AddressOfFunctions);
+            ExportTable = RVA(Section, Directory.Export->AddressOfFunctions - SectionHdr->RVA);
         }
     }
-    /* Normalize the bases if they couldn't have been determined above */
-    if (OptHeader->BaseOfCode == ULONG_MAX)
+
+    /* Convert the object/section table and initialize the remaining fields */
+    if (!ReconstructSections(NtHeader,
+                             ObjTable,
+                             Directory.Export,
+                             ExportTable,
+                             /* These two could be replaced by a single "IN PIMAGE_NT_HEADERS32 NtHeader" */
+                             FileHeader,
+                             OptHeader,
+                             &SectionTable))
     {
         OptHeader->BaseOfCode = 0;
         OptHeader->SizeOfCode = 0;
-    }
-    if (OptHeader->BaseOfData == ULONG_MAX)
-    {
         OptHeader->BaseOfData = 0;
-        OptHeader->SizeOfInitializedData = 0;
+        OptHeader->SizeOfInitializedData   = 0;
+        OptHeader->SizeOfUninitializedData = 0;
     }
-
 
     /*
      * Now, do the actual NT PE headers fixups in the file
@@ -1846,7 +1245,7 @@ ProcessPEImage(
     if (Section)
     {
         ASSERT(SectionHdr);
-        if (!FlushSectionToFile(pDestFile, SectionHdr, Section))
+        if (!FlushOldPESectionToFile(pDestFile, SectionHdr, Section))
             PrintError("Failed to update the %s section!\n", "Export");
 
         /* Free the allocated export section */
@@ -1854,13 +1253,13 @@ ProcessPEImage(
     }
 
     /* Import directory */
-    Section = LoadDirectoryEntryAndSection(pImageFile,
-                                           NtHeader,
-                                           IMAGE_DIRECTORY_ENTRY_IMPORT,
-                                           &Directory.Import,
-                                           &DirectorySize,
-                                           &SectionHdr,
-                                           &SectionSize);
+    Section = LoadOldPEDirectoryEntryAndSection(pImageFile,
+                                                NtHeader,
+                                                IMAGE_DIRECTORY_ENTRY_IMPORT,
+                                                &Directory.Import,
+                                                &DirectorySize,
+                                                &SectionHdr,
+                                                &SectionSize);
 #if 0
     if (!SectionHdr)
         PrintWarning("WARNING: Could not load the import directory, ignoring...\n");
@@ -1869,30 +1268,15 @@ ProcessPEImage(
 #endif
     if (Section)
     {
-        PIMAGE_IMPORT_DESCRIPTOR Import = Directory.Import;
-        PIMAGE_THUNK_DATA32 Thunk;
+        ASSERT(SectionHdr);
 
-        ASSERT(SectionHdr && Directory.Import);
+        FixupImportsSection(Directory.Import,
+                            DirectorySize,
+                            SectionHdr->RVA,
+                            SectionSize,
+                            Section);
 
-        for (; (/* (Import->Name != 0) && */ (Import->FirstThunk != 0) &&
-               ((ULONG_PTR)Import - (ULONG_PTR)Directory.Import < DirectorySize));
-             ++Import)
-        {
-            /* In old-PE style, these RVAs are from the beginning of the
-             * export section. Convert them to RVAs from the base of the image. */
-            if (Import->Name)
-                Import->Name += SectionHdr->RVA;
-
-            /* Loop through the thunks as well */
-            Thunk = RVA(Section, Import->FirstThunk - SectionHdr->RVA);
-            for (; Thunk->u1.AddressOfData; ++Thunk)
-            {
-                Thunk->u1.AddressOfData += SectionHdr->RVA;
-            }
-        }
-        /* Strangely enough, FirstThunk is OK, certainly because it points into another section */
-
-        if (!FlushSectionToFile(pDestFile, SectionHdr, Section))
+        if (!FlushOldPESectionToFile(pDestFile, SectionHdr, Section))
             PrintError("Failed to update the %s section!\n", "Import");
 
         /* Free the allocated section */
@@ -1908,13 +1292,13 @@ ProcessPEImage(
     /* Relocations directory */
 
     /* Debug directory */
-    Section = LoadDirectoryEntryAndSection(pImageFile,
-                                           NtHeader,
-                                           IMAGE_DIRECTORY_ENTRY_DEBUG,
-                                           &Directory.Debug,
-                                           &DirectorySize,
-                                           &SectionHdr,
-                                           &SectionSize);
+    Section = LoadOldPEDirectoryEntryAndSection(pImageFile,
+                                                NtHeader,
+                                                IMAGE_DIRECTORY_ENTRY_DEBUG,
+                                                &Directory.Debug,
+                                                &DirectorySize,
+                                                &SectionHdr,
+                                                &SectionSize);
 #if 0
     if (!SectionHdr)
         PrintWarning("WARNING: Could not load the debug directory, ignoring...\n");
@@ -1922,9 +1306,11 @@ ProcessPEImage(
         PrintWarning("WARNING: Could not load the debug section, ignoring...\n");
 #endif
 
-    // FIXME: To be determined when converting the .debug section
-    // FileHeader->PointerToSymbolTable = 0;
-    // FileHeader->NumberOfSymbols = 0;
+    /*
+     * Convert the debug directory data and initialize the PE COFF-specific debug fields.
+     */
+    FileHeader->PointerToSymbolTable = 0;
+    FileHeader->NumberOfSymbols      = 0;
 
     if (Section)
     {
@@ -1943,12 +1329,12 @@ ProcessPEImage(
          * is of the old format (COFF_DEBUG_DIRECTORY) or the
          * new one (IMAGE_DEBUG_DIRECTORY).
          */
-        if (DirectorySize % sizeof(COFF_DEBUG_DIRECTORY) != 0)
+        if ((DirectorySize == 0) || (DirectorySize % sizeof(COFF_DEBUG_DIRECTORY) != 0))
         {
             /* Definitively not COFF_DEBUG_DIRECTORY; could be IMAGE_DEBUG_DIRECTORY
              * or something unknown to us; in any case we don't touch it. */
         }
-        else // if (DirectorySize % sizeof(COFF_DEBUG_DIRECTORY) == 0)
+        else // if ((DirectorySize > 0) && (DirectorySize % sizeof(COFF_DEBUG_DIRECTORY) == 0))
         {
             if (DirectorySize % sizeof(IMAGE_DEBUG_DIRECTORY) != 0)
             {
@@ -1961,8 +1347,8 @@ ProcessPEImage(
                  * We need to dig deeper.
                  * Indeed both conditions can be satisfied when
                  * DirectorySize = some_integer * 42 (hehe, 42 :D), because:
-                 * sizeof(COFF_DEBUG_DIRECTORY) == 0x18 == 24 == 8*3,
-                 * sizeof(IMAGE_DEBUG_DIRECTORY) == 0x1C == 28 == 7*4.
+                 * sizeof(COFF_DEBUG_DIRECTORY) == 24 == 8*3,
+                 * sizeof(IMAGE_DEBUG_DIRECTORY) == 28 == 7*4.
                  * The condition is equivalent to finding whether there exists
                  * integers a, b, such that:
                  * DirectorySize == a * 24 == b * 28 .
@@ -1971,14 +1357,463 @@ ProcessPEImage(
                  * that a == n * 7 and b == n * 6, and therefore,
                  * DirectorySize == n * 6 * 7.
                  */
+
+                /*
+                 * Suppose that the directory data indeed is of the old format.
+                 * Since AddressOfRawData and PointerToRawData are not at the same
+                 * position wrt. the new format (they are 1 ULONG before), use these
+                 * as the comparison criterium.
+                 */
+                if (Directory.Debug->PointerToRawData != 0)
+                {
+                    /* The debug data must be within the debug directory's section */
+                    if ((SectionHdr->SeekOffset <= Directory.Debug->PointerToRawData) &&
+                        // (Directory.Debug->PointerToRawData < SectionHdr->SeekOffset + SectionHdr->OnDiskSize) &&
+                        (Directory.Debug->PointerToRawData + Directory.Debug->SizeOfData <= SectionHdr->SeekOffset + SectionHdr->OnDiskSize))
+                    {
+                        /*
+                         * The RAW debug data appears to be in the section the debug information belongs.
+                         * Check also the validity of AddressOfRawData.
+                         * NOTE: The RVA address can be zero if the debug data is not loaded in memory.
+                         */
+                        if ((Directory.Debug->AddressOfRawData == 0) ||
+                            (Directory.Debug->AddressOfRawData == SectionHdr->RVA + (Directory.Debug->PointerToRawData - SectionHdr->SeekOffset)))
+                        {
+                            /* The reported RVA address is valid, so this is indeed a correct old debug directory */
+                            IsOldDebug = TRUE;
+                        }
+                    }
+                }
             }
         }
 
+        /*
+         * Perform extra sanity checks.
+         */
         if (IsOldDebug)
         {
-            // TODO : Do the conversion!
+            // C_ASSERT(FIELD_OFFSET(IMAGE_DEBUG_DIRECTORY, Characteristics) == FIELD_OFFSET(COFF_DEBUG_DIRECTORY, Characteristics));
+            if (Directory.Debug->Characteristics != 0)
+            {
+                PrintWarning("WARNING: Non-zero Characteristics %d (reserved)\n",
+                             Directory.Debug->Characteristics);
+            }
+
+            /* In all real-life examples, the version stamp appears to always be zero */
+            if (Directory.Debug->VersionStamp != 0)
+            {
+                PrintWarning("WARNING: Non-zero VersionStamp %d (reserved)\n",
+                             Directory.Debug->VersionStamp);
+            }
+
+            /* The debug data must be within the debug directory's section */
+            if ( !((SectionHdr->SeekOffset <= Directory.Debug->PointerToRawData) &&
+                // (Directory.Debug->PointerToRawData < SectionHdr->SeekOffset + SectionHdr->OnDiskSize) &&
+                   (Directory.Debug->PointerToRawData + Directory.Debug->SizeOfData <= SectionHdr->SeekOffset + SectionHdr->OnDiskSize)) )
+            {
+                PrintError("Debug data is not within the debug directory's section!\n");
+                IsOldDebug = FALSE; // Reset so that we don't do the conversion below.
+            }
+
+            /*
+             * The RAW debug data appears to be in the section the debug information belongs.
+             * Check also the validity of AddressOfRawData.
+             * NOTE: The RVA address can be zero if the debug data is not loaded in memory.
+             */
+            if ( !((Directory.Debug->AddressOfRawData == 0) ||
+                   (Directory.Debug->AddressOfRawData == SectionHdr->RVA + (Directory.Debug->PointerToRawData - SectionHdr->SeekOffset))) )
+            {
+                PrintError("Debug data address is invalid!\n");
+                IsOldDebug = FALSE; // Reset so that we don't do the conversion below.
+            }
+
+            /* Check for a possible valid debug type field.
+             * NT PDK v1.196 only supports COFF debug symbols. */
+            if (Directory.Debug->Type > IMAGE_DEBUG_TYPE_COFF)
+            {
+                PrintWarning("WARNING: Unrecognized image debug type %d\n",
+                             Directory.Debug->Type);
+            }
+        }
+        else // if ((DirectorySize > 0) && (DirectorySize % sizeof(IMAGE_DEBUG_DIRECTORY) == 0))
+        {
+            /*
+             * Keep this code as reference for validation, but disabled, as we
+             * don't actually assume that this is a new-format debug directory data.
+             */
+#if 0
+            /* Suppose first that the data is of the new format and verify its consistency */
+            PIMAGE_DEBUG_DIRECTORY DebugDirectory = (PIMAGE_DEBUG_DIRECTORY)Directory.Debug;
+
+            C_ASSERT(FIELD_OFFSET(IMAGE_DEBUG_DIRECTORY, Characteristics) == FIELD_OFFSET(COFF_DEBUG_DIRECTORY, Characteristics));
+            if (DebugDirectory->Characteristics != 0)
+            {
+                PrintWarning("WARNING: Non-zero Characteristics %d (reserved)\n",
+                             DebugDirectory->Characteristics);
+            }
+
+            /* In all real-life examples, these two version numbers appear to always be zero */
+            if ((DebugDirectory->MajorVersion != 0) || (DebugDirectory->MinorVersion != 0))
+            {
+                PrintWarning("WARNING: Debug data version %d.%d is not zero\n",
+                             DebugDirectory->MajorVersion, DebugDirectory->MinorVersion);
+            }
+
+            /* Check for a possible valid debug type field, which
+             * should definitively be smaller than UCHAR_MAX. */
+            C_ASSERT(FIELD_OFFSET(IMAGE_DEBUG_DIRECTORY, Type) == FIELD_OFFSET(COFF_DEBUG_DIRECTORY, Type));
+            if (DebugDirectory->Type < UCHAR_MAX)
+            {
+                /* Just an optional sanity check: I use the maximum value
+                 * defined in Windows Server 2003, knowing that later values
+                 * definitively did not exist in older Windows NT versions. */
+                if (DebugDirectory->Type > IMAGE_DEBUG_TYPE_CLSID
+                    /* IMAGE_DEBUG_TYPE_EX_DLLCHARACTERISTICS == 20 */)
+                {
+                    PrintWarning("WARNING: Unrecognized image debug type %d\n", DebugDirectory->Type);
+                }
+            }
+
+            /* The debug data must be within the debug directory's section */
+            if ( !((SectionHdr->SeekOffset <= DebugDirectory->PointerToRawData) &&
+                // (DebugDirectory->PointerToRawData < SectionHdr->SeekOffset + SectionHdr->OnDiskSize) &&
+                   (DebugDirectory->PointerToRawData + DebugDirectory->SizeOfData <= SectionHdr->SeekOffset + SectionHdr->OnDiskSize)) )
+            {
+                PrintError("Debug data is not within the debug directory's section!\n");
+            }
+
+            /*
+             * The RAW debug data appears to be in the section the debug information belongs.
+             * Check also the validity of AddressOfRawData.
+             * NOTE: The RVA address can be zero if the debug data is not loaded in memory.
+             */
+            if ( !((DebugDirectory->AddressOfRawData == 0) ||
+                   (DebugDirectory->AddressOfRawData == SectionHdr->RVA + (DebugDirectory->PointerToRawData - SectionHdr->SeekOffset))) )
+            {
+                PrintError("Debug data address is invalid!\n");
+            }
+#endif
         }
 
+        /*
+         * Do the conversion.
+         */
+        if (IsOldDebug)
+        {
+            ULONG NumberOfDebugDirectories = DirectorySize / sizeof(COFF_DEBUG_DIRECTORY);
+            ULONG NewDirectorySize = ROUND_UP(NumberOfDebugDirectories * sizeof(IMAGE_DEBUG_DIRECTORY), sizeof(ULONG));
+
+            /*
+             * The algorithm works as follows:
+             *
+             * 1. Check whether we can move the data within the .debug section.
+             *    This is done by looking at the presence of at least **FIVE
+             *    trailing zero bytes** at the very end of the debug data.
+             *    If these are present, we are ensured that these are padding
+             *    bytes (and not e.g. actual debug data, like an ULONG, that
+             *    may need to be NULL).
+             *    If found, then we can move the data, and upgrade the COFF_DEBUG_DIRECTORY
+             *    data to the newer IMAGE_DEBUG_DIRECTORY, which also happens to
+             *    be exactly 4 bytes larger than the older structure.
+             *
+             * 2. If we cannot move the data, search for at least sizeof(IMAGE_DEBUG_DIRECTORY)
+             *    bytes of slack space at the end of, first, the .debug section,
+             *    and if not, any other existing initialized data section (i.e.
+             *    NOT .bss) or text section.
+             *    If found, then write the newer IMAGE_DEBUG_DIRECTORY.
+             *
+             * 3. If this is still not possible, try extending any last section
+             *    (usually the .debug section, but can be any other one) and write
+             *    the newer IMAGE_DEBUG_DIRECTORY.
+             */
+            PIMAGE_DEBUG_DIRECTORY DebugDirectory;
+            PVOID TmpSection;         // Allocated section.
+            ULONG TmpSectionSize = 0; // The size of the allocated section.
+            ULONG i;
+            BOOLEAN bConversionDone = FALSE;
+
+            /* Step 1: Can we move the data within the .debug section? */
+
+            ULONG EndData = max(Directory.Debug->PointerToRawData + Directory.Debug->SizeOfData,
+                                SectionHdr->SeekOffset + SectionHdr->OnDiskSize);
+            PUCHAR Padding;
+
+            C_ASSERT(sizeof(IMAGE_DEBUG_DIRECTORY) <= sizeof(COFF_DEBUG_DIRECTORY) + sizeof(ULONG));
+            if (EndData - SectionHdr->SeekOffset > NewDirectorySize - DirectorySize + 1)
+            {
+                Padding = (PUCHAR)RVA(Section, (EndData - (NewDirectorySize - DirectorySize + 1)) - SectionHdr->SeekOffset);
+
+                if (IsZeroMemory(Padding, NewDirectorySize - DirectorySize + 1))
+                {
+                    COFF_DEBUG_DIRECTORY OrgDebugDirectory = *Directory.Debug;
+
+                    //
+                    // FIXME: Reduce the size of the data for only the debug directory
+                    // whose data has been actually reduced (data that is at the end).
+                    //
+                    OrgDebugDirectory.SizeOfData -= NewDirectorySize - DirectorySize;
+
+                    /* Move the debug data, without the last bytes */
+                    RtlMoveMemory(RVA(Section, (Directory.Debug->PointerToRawData + NewDirectorySize - DirectorySize) - SectionHdr->SeekOffset),
+                                  RVA(Section, Directory.Debug->PointerToRawData - SectionHdr->SeekOffset),
+                                  OrgDebugDirectory.SizeOfData);
+
+                    /* Convert the debug directories in place */
+                    // for (i = 0; i < NumberOfDebugDirectories; ++i)
+                    {
+                        DebugDirectory = (PIMAGE_DEBUG_DIRECTORY)Directory.Debug;
+                        DebugDirectory->Characteristics  = OrgDebugDirectory.Characteristics;
+                        DebugDirectory->TimeDateStamp    = FileHeader->TimeDateStamp;
+                        DebugDirectory->MajorVersion     = LOWORD(OrgDebugDirectory.VersionStamp);
+                        DebugDirectory->MinorVersion     = HIWORD(OrgDebugDirectory.VersionStamp);
+                        DebugDirectory->Type             = OrgDebugDirectory.Type;
+                        DebugDirectory->SizeOfData       = OrgDebugDirectory.SizeOfData;
+                        DebugDirectory->AddressOfRawData = OrgDebugDirectory.AddressOfRawData + NewDirectorySize - DirectorySize;
+                        DebugDirectory->PointerToRawData = OrgDebugDirectory.PointerToRawData + NewDirectorySize - DirectorySize;
+                    }
+
+                    if (!FlushOldPESectionToFile(pDestFile, SectionHdr, Section))
+                    {
+                        // /* Use the new PE converted section for the name */
+                        // PrintError("Failed to update the '%.*s' section!\n",
+                        //            (ULONG)RTL_NUMBER_OF(SectionTable[i].Name), SectionTable[i].Name);
+                        PrintError("Failed to update the '%s' section!\n", ".debug");
+                    }
+                    else
+                    {
+                        /* Modify the directory entry */
+                        OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size =
+                         NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size = NewDirectorySize;
+
+                        bConversionDone = TRUE;
+                    }
+                }
+            }
+
+            /* Step 2: Search for slack space */
+            if (!bConversionDone)
+            {
+                // TODO: Look at the .debug section first (this is the current section).
+
+                /* Loop over the sections to find some slack space */
+                if (ObjTable)
+                {
+                    IMAGE_DEBUG_DIRECTORY DummyZero;
+
+                    ASSERT(NtHeader->NumberOfObjects);
+                    ASSERT(SectionTable);
+
+                    RtlZeroMemory(&DummyZero, sizeof(DummyZero));
+
+                    for (i = 0; i < NtHeader->NumberOfObjects; ++i)
+                    {
+                        /* Skip the .debug section */
+                        // if (SectionHdr == &ObjTable[i])
+                        if (SectionHdr->SeekOffset == ObjTable[i].SeekOffset)
+                            continue;
+
+                        /* Skip the .bss section */
+                        // Use the new PE converted section characteristics.
+                        // if (SectionTable[i].Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA)
+                        if (ObjTable[i].VirtualSize == 0 || ObjTable[i].OnDiskSize == 0)
+                            continue;
+
+                        /* Load the section */
+                        if (!LoadOldPESectionFromFile(pImageFile,
+                                                      &ObjTable[i],
+                                                      &TmpSection,
+                                                      NULL))
+                        {
+                            /* Just skip this section. No need to display errors
+                             * since LoadOldPESectionFromFile() does that already. */
+                            continue;
+                        }
+                        ASSERT(TmpSection);
+
+                        /*
+                         * Heuristics:
+                         * Search for sizeof(IMAGE_DEBUG_DIRECTORY) + 2 bytes slack space.
+                         * The "+ 2 bytes" ensures that if there is some extra data before
+                         * e.g. a string that needs to be NULL-terminated, this data remains fine.
+                         */
+                        EndData = ObjTable[i].SeekOffset + ObjTable[i].OnDiskSize;
+
+                        if (EndData - ObjTable[i].SeekOffset >= sizeof(IMAGE_DEBUG_DIRECTORY) + 2)
+                        {
+                            Padding = (PUCHAR)RVA(TmpSection, (EndData - sizeof(IMAGE_DEBUG_DIRECTORY) - 2) - ObjTable[i].SeekOffset);
+
+                            if (IsZeroMemory(Padding, sizeof(IMAGE_DEBUG_DIRECTORY) + 2))
+                            {
+                                /* Add the debug directory */
+                                DebugDirectory = (PIMAGE_DEBUG_DIRECTORY)&Padding[2];
+                                DebugDirectory->Characteristics  = Directory.Debug->Characteristics;
+                                DebugDirectory->TimeDateStamp    = FileHeader->TimeDateStamp;
+                                DebugDirectory->MajorVersion     = LOWORD(Directory.Debug->VersionStamp);
+                                DebugDirectory->MinorVersion     = HIWORD(Directory.Debug->VersionStamp);
+                                DebugDirectory->Type             = Directory.Debug->Type;
+                                DebugDirectory->SizeOfData       = Directory.Debug->SizeOfData;
+                                DebugDirectory->AddressOfRawData = Directory.Debug->AddressOfRawData;  // FIXME!
+                                DebugDirectory->PointerToRawData = Directory.Debug->PointerToRawData;  // FIXME!
+
+                                if (!FlushOldPESectionToFile(pDestFile, &ObjTable[i], TmpSection))
+                                {
+                                    /* Use the new PE converted section for the name */
+                                    PrintError("Failed to update the '%.*s' section!\n",
+                                               (ULONG)RTL_NUMBER_OF(SectionTable[i].Name), SectionTable[i].Name);
+                                }
+                                else
+                                {
+                                    /* Modify the directory entry */
+                                    OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress =
+                                     NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].RVA =
+                                        (ULONG)RVA(ObjTable[i].RVA, (ULONG_PTR)DebugDirectory - (ULONG_PTR)TmpSection);
+
+                                    OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size =
+                                     NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size = sizeof(*DebugDirectory);
+
+                                    bConversionDone = TRUE;
+                                }
+                            }
+                        }
+
+                        /* Free the allocated section */
+                        free(TmpSection);
+
+                        /* Break if we are done */
+                        if (bConversionDone)
+                            break;
+                    }
+                }
+            }
+
+            /* Step 3: Extend the last section */
+            if (!bConversionDone)
+            {
+                if (ObjTable)
+                {
+                    PIMAGE_OBJECT_HEADER LastSectionHdr;
+                    size_t NewSectionSize;
+
+                    ASSERT(NtHeader->NumberOfObjects);
+                    ASSERT(SectionTable);
+
+                    /* Find the last section in the file; we do not rely on whether
+                     * or not they are already sorted in the section table. */
+                    LastSectionHdr = &ObjTable[0];
+                    for (i = 0; i < NtHeader->NumberOfObjects; ++i)
+                    {
+                        if (LastSectionHdr->SeekOffset < ObjTable[i].SeekOffset)
+                            LastSectionHdr = &ObjTable[i];
+                    }
+                    /* Recalculate the 'i' corresponding to LastSectionHdr for later purposes */
+                    i = (ULONG)(LastSectionHdr - ObjTable);
+
+                    /* If this is the .bss section, skip it */
+                    // Use the new PE converted section characteristics.
+                    // if (SectionTable[i].Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA)
+                    if (LastSectionHdr->VirtualSize == 0 || LastSectionHdr->OnDiskSize == 0)
+                        goto StopStep3;
+
+                    /* Load the last section */
+                    if (!LoadOldPESectionFromFile(pImageFile,
+                                                  LastSectionHdr,
+                                                  &TmpSection,
+                                                  &TmpSectionSize))
+                    {
+                        /* Just skip this section. No need to display errors
+                         * since LoadOldPESectionFromFile() does that already. */
+                        goto StopStep3;
+                    }
+                    ASSERT(TmpSection);
+
+
+                    /*
+                     * LoadOldPESectionFromFile() allocated a section buffer, of size equals to the
+                     * max(VirtualSize, OnDiskSize) (size returned in TmpSectionSize), so we will
+                     * need to re-allocate it only if OnDiskSize + sizeof(IMAGE_DEBUG_DIRECTORY)
+                     * is > TmpSectionSize.
+                     */
+                    if (LastSectionHdr->OnDiskSize + sizeof(IMAGE_DEBUG_DIRECTORY) > TmpSectionSize)
+                    {
+                        PVOID ptr;
+
+                        /* Enlarge the section buffer */
+                        NewSectionSize = ROUND_UP(TmpSectionSize + sizeof(IMAGE_DEBUG_DIRECTORY), NtHeader->FileAlign);
+                        ptr = realloc(TmpSection, NewSectionSize);
+                        if (!ptr)
+                        {
+                            PrintError("Failed to re-allocate %lu bytes for the '%.*s' section\n",
+                                       (ULONG)NewSectionSize,
+                                       (ULONG)RTL_NUMBER_OF(SectionTable[i].Name), SectionTable[i].Name);
+
+                            free(TmpSection);
+                            goto StopStep3;
+                        }
+                        TmpSection = ptr;
+
+                        /* Zero out the slack space */
+                        RtlZeroMemory(RVA(TmpSection, TmpSectionSize),
+                                      NewSectionSize - TmpSectionSize);
+                    }
+
+                    /* Add the debug directory */
+                    DebugDirectory = (PIMAGE_DEBUG_DIRECTORY)RVA(TmpSection, LastSectionHdr->OnDiskSize);
+
+                    LastSectionHdr->OnDiskSize = ROUND_UP(LastSectionHdr->OnDiskSize + sizeof(IMAGE_DEBUG_DIRECTORY), NtHeader->FileAlign);
+                    // LastSectionHdr->VirtualSize; // FIXME??
+
+                    DebugDirectory->Characteristics  = Directory.Debug->Characteristics;
+                    DebugDirectory->TimeDateStamp    = FileHeader->TimeDateStamp;
+                    DebugDirectory->MajorVersion     = LOWORD(Directory.Debug->VersionStamp);
+                    DebugDirectory->MinorVersion     = HIWORD(Directory.Debug->VersionStamp);
+                    DebugDirectory->Type             = Directory.Debug->Type;
+                    DebugDirectory->SizeOfData       = Directory.Debug->SizeOfData;
+                    DebugDirectory->AddressOfRawData = Directory.Debug->AddressOfRawData;
+                    DebugDirectory->PointerToRawData = Directory.Debug->PointerToRawData;
+
+                    if (!FlushOldPESectionToFile(pDestFile, LastSectionHdr, TmpSection))
+                    {
+                        /* Use the new PE converted section for the name */
+                        PrintError("Failed to update the '%.*s' section!\n",
+                                   (ULONG)RTL_NUMBER_OF(SectionTable[i].Name), SectionTable[i].Name);
+                    }
+                    else
+                    {
+                        /* Modify the directory entry */
+                        OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress =
+                         NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].RVA =
+                            (ULONG)RVA(LastSectionHdr->RVA, (ULONG_PTR)DebugDirectory - (ULONG_PTR)TmpSection);
+
+                        OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size =
+                         NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size = sizeof(*DebugDirectory);
+
+                        bConversionDone = TRUE;
+                    }
+
+                    /* Free the allocated section */
+                    free(TmpSection);
+
+                StopStep3:
+                    ;
+                }
+            }
+
+            if (!bConversionDone)
+            {
+                PrintError("Failed to convert the debug directory!\n");
+            }
+            else
+            {
+                if (Directory.Debug->Type == IMAGE_DEBUG_TYPE_COFF)
+                {
+                    // TODO!
+                    FileHeader->PointerToSymbolTable = 0;
+                    FileHeader->NumberOfSymbols = 0;
+                }
+            }
+        }
+
+        /* Free the allocated section */
         free(Section);
     }
 
@@ -1995,10 +1830,9 @@ ProcessPEImage(
     FirstSectionVA = ULONG_MAX;
     if (FileHeader->NumberOfSections)
     {
-        PIMAGE_SECTION_HEADER SectionTable;
         ULONG i;
 
-        SectionTable = RVA(FileHeader + 1, FileHeader->SizeOfOptionalHeader);
+        ASSERT(SectionTable);
         for (i = 0; i < FileHeader->NumberOfSections; ++i)
         {
             if (SectionTable[i].PointerToRawData >= DosHeader->e_lfanew + NtHeaderSize)

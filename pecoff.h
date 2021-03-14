@@ -1,7 +1,7 @@
 /*
  * PROJECT:     PE Converter for NT PDK v1.196 (September 1991) and PDK October 1991
  * LICENSE:     GPL-2.0+ (https://spdx.org/licenses/GPL-2.0+)
- * PURPOSE:     New PE Format Type definitions (for only x86/MIPS platforms).
+ * PURPOSE:     New PE Format Type definitions (only for x86/MIPS platforms).
  *
  * Adapted from the ReactOS Host Headers
  * Copyright 2002 Casper S. Hornstrup (chorns@users.sourceforge.net)
@@ -10,6 +10,9 @@
  * Copyright 2011 Timo Kreuzer (timo.kreuzer@reactos.org)
  * under the same license.
  */
+
+#ifndef _PECOFF_H_
+#define _PECOFF_H_
 
 #pragma once
 
@@ -113,19 +116,35 @@
 /*
  * Section Characteristics
  */
-#define IMAGE_SCN_TYPE_NOLOAD             0x00000002
+#define IMAGE_SCN_TYPE_REGULAR            0x00000000    // Reserved - Old name
+#define IMAGE_SCN_TYPE_REG                IMAGE_SCN_TYPE_REGULAR
+#define IMAGE_SCN_TYPE_DUMMY              0x00000001    // Reserved - Old name
+#define IMAGE_SCN_TYPE_DSECT              IMAGE_SCN_TYPE_DUMMY
+#define IMAGE_SCN_TYPE_NOLOAD             0x00000002    // Reserved
+#define IMAGE_SCN_TYPE_GROUPED            0x00000004    // Reserved - Old name
+#define IMAGE_SCN_TYPE_GROUP              IMAGE_SCN_TYPE_GROUPED
 #define IMAGE_SCN_TYPE_NO_PAD             0x00000008
+#define IMAGE_SCN_TYPE_COPY               0x00000010    // Reserved
 #define IMAGE_SCN_CNT_CODE                0x00000020
 #define IMAGE_SCN_CNT_INITIALIZED_DATA    0x00000040
 #define IMAGE_SCN_CNT_UNINITIALIZED_DATA  0x00000080
-#define IMAGE_SCN_LNK_OTHER               0x00000100
+#define IMAGE_SCN_LNK_OTHER               0x00000100    // Reserved
 #define IMAGE_SCN_LNK_INFO                0x00000200
+#define IMAGE_SCN_LNK_OVERLAY             0x00000400    // Reserved
+#define IMAGE_SCN_TYPE_OVER               IMAGE_SCN_LNK_OVERLAY
 #define IMAGE_SCN_LNK_REMOVE              0x00000800
+#define IMAGE_SCN_LNK_COMDAT              0x00001000
+#define IMAGE_SCN_COMPRESSED              0x00002000    // Reserved
+#define IMAGE_SCN_MEM_PROTECTED           0x00004000    // Obsolete
 #define IMAGE_SCN_NO_DEFER_SPEC_EXC       0x00004000
 #define IMAGE_SCN_GPREL                   0x00008000
-#define IMAGE_SCN_MEM_PURGEABLE           0x00020000
-#define IMAGE_SCN_MEM_LOCKED              0x00040000
-#define IMAGE_SCN_MEM_PRELOAD             0x00080000
+#define IMAGE_SCN_MEM_FARDATA             IMAGE_SCN_GPREL
+#define IMAGE_SCN_MEM_SYSHEAP             0x00010000    // Obsolete
+#define IMAGE_SCN_MEM_PURGEABLE           0x00020000    // Reserved
+#define IMAGE_SCN_MEM_16BIT               IMAGE_SCN_MEM_PURGEABLE
+#define IMAGE_SCN_MEM_LOCKED              0x00040000    // Reserved
+#define IMAGE_SCN_MEM_PRELOAD             0x00080000    // Reserved
+/* Range of IMAGE_SCN_ALIGN_xxBYTES values */
 #define IMAGE_SCN_LNK_NRELOC_OVFL         0x01000000
 #define IMAGE_SCN_MEM_DISCARDABLE         0x02000000
 #define IMAGE_SCN_MEM_NOT_CACHED          0x04000000
@@ -425,6 +444,21 @@ typedef struct _IMAGE_DEBUG_DIRECTORY
 #define IMAGE_DEBUG_TYPE_FIXUP          6
 #define IMAGE_DEBUG_TYPE_OMAP_TO_SRC    7
 #define IMAGE_DEBUG_TYPE_OMAP_FROM_SRC  8
+#define IMAGE_DEBUG_TYPE_BORLAND        9
+#define IMAGE_DEBUG_TYPE_RESERVED10     10
+#define IMAGE_DEBUG_TYPE_CLSID          11
+
+typedef struct _IMAGE_COFF_SYMBOLS_HEADER
+{
+    ULONG NumberOfSymbols;
+    ULONG LvaToFirstSymbol;
+    ULONG NumberOfLinenumbers;
+    ULONG LvaToFirstLinenumber;
+    ULONG RvaToFirstByteOfCode;
+    ULONG RvaToLastByteOfCode;
+    ULONG RvaToFirstByteOfData;
+    ULONG RvaToLastByteOfData;
+} IMAGE_COFF_SYMBOLS_HEADER, *PIMAGE_COFF_SYMBOLS_HEADER;
 
 typedef struct _IMAGE_BASE_RELOCATION
 {
@@ -475,4 +509,8 @@ typedef struct _IMAGE_SYMBOL
 typedef struct _IMAGE_SYMBOL UNALIGNED *PIMAGE_SYMBOL;
 #include <poppack.h>
 
-#define IMAGE_FIRST_SECTION(h) ((PIMAGE_SECTION_HEADER) ((ULONG_PTR)h+FIELD_OFFSET(IMAGE_NT_HEADERS,OptionalHeader)+((PIMAGE_NT_HEADERS)(h))->FileHeader.SizeOfOptionalHeader))
+#define IMAGE_FIRST_SECTION(h) ((PIMAGE_SECTION_HEADER)((ULONG_PTR)h + FIELD_OFFSET(IMAGE_NT_HEADERS, OptionalHeader) + ((PIMAGE_NT_HEADERS)(h))->FileHeader.SizeOfOptionalHeader))
+
+#define RVA(b, m) ((PVOID)((ULONG_PTR)(b) + (ULONG_PTR)(m)))
+
+#endif /* _PECOFF_H_ */

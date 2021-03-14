@@ -12,6 +12,8 @@
 #ifndef _TYPEDEFS_HOST_H
 #define _TYPEDEFS_HOST_H
 
+#pragma once
+
 #include <assert.h>
 #include <stdlib.h>
 #include <limits.h>
@@ -144,8 +146,9 @@ typedef int64_t LONGLONG, LONG64, INT64;
 typedef INT NTSTATUS;
 typedef ULONG_PTR SIZE_T, *PSIZE_T;
 
+#define MAXUCHAR  UCHAR_MAX
 #define MAXUSHORT USHRT_MAX
-
+#define MAXULONG  ULONG_MAX
 
 /* Widely used macros */
 #define LOBYTE(w)               ((BYTE)(w))
@@ -154,8 +157,6 @@ typedef ULONG_PTR SIZE_T, *PSIZE_T;
 #define HIWORD(l)               ((WORD)(((DWORD_PTR)(l)>>16)&0xFFFF))
 #define MAKEWORD(a,b)           ((WORD)(((BYTE)(a))|(((WORD)((BYTE)(b)))<<8)))
 #define MAKELONG(a,b)           ((LONG)(((WORD)(a))|(((DWORD)((WORD)(b)))<<16)))
-
-#define MAXULONG 0xFFFFFFFF
 
 #define NT_SUCCESS(x)           ((x)>=0)
 
@@ -183,6 +184,8 @@ typedef ULONG_PTR SIZE_T, *PSIZE_T;
 #define ROUND_UP(n, align) \
     ROUND_DOWN(((ULONG_PTR)(n)) + (align) - 1, (align))
 
+#define IS_ALIGNED(addr, align) \
+    (((ULONG_PTR)(addr) & ((align) - 1)) == 0)
 
 #define max(a, b)   (((a) > (b)) ? (a) : (b))
 #define min(a, b)   (((a) < (b)) ? (a) : (b))
@@ -235,10 +238,14 @@ extern "C++" {
         : (FIELD_OFFSET(type, field1) - FIELD_OFFSET(type, field2) - RTL_FIELD_SIZE(type, field2)))
 
 
-#define RtlZeroMemory(Destination, Length)            memset(Destination, 0, Length)
-#define RtlCopyMemory(Destination, Source, Length)    memcpy(Destination, Source, Length)
-#define RtlMoveMemory(Destination, Source, Length)    memmove(Destination, Source, Length)
+#define RtlFillMemory(Destination, Length, Fill)        memset(Destination, Fill, Length)
+#define RtlZeroMemory(Destination, Length)              RtlFillMemory(Destination, Length, 0)
+#define RtlCopyMemory(Destination, Source, Length)      memcpy(Destination, Source, Length)
+#define RtlMoveMemory(Destination, Source, Length)      memmove(Destination, Source, Length)
+#define RtlEqualMemory(Destination, Source, Length)     (!memcmp(Destination, Source, Length))
+//
+// NOTE: We do not define RtlCompareMemory(), as its return value semantics
+// is different than the one from memcmp(), and there is no way to convert
+// one into the other.
 
-/* Prevent inclusion of some other headers */
-
-#endif
+#endif /* _TYPEDEFS_HOST_H */
