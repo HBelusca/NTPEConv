@@ -511,6 +511,4 @@ typedef struct _IMAGE_SYMBOL UNALIGNED *PIMAGE_SYMBOL;
 
 #define IMAGE_FIRST_SECTION(h) ((PIMAGE_SECTION_HEADER)((ULONG_PTR)h + FIELD_OFFSET(IMAGE_NT_HEADERS, OptionalHeader) + ((PIMAGE_NT_HEADERS)(h))->FileHeader.SizeOfOptionalHeader))
 
-#define RVA(b, m) ((PVOID)((ULONG_PTR)(b) + (ULONG_PTR)(m)))
-
 #endif /* _PECOFF_H_ */

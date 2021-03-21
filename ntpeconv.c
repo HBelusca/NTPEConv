@@ -20,7 +20,6 @@
 #include "pecoff.h"
 #include "nt196pe.h"
 
-
 #include "ntpeconv.h"
 #include "pehlp.h"
 
@@ -1177,8 +1176,10 @@ ProcessPEImage(
 
         /* Sanity check: Check that the export function table is
          * fully contained in the section, otherwise bail out. */
-        if ( !((SectionHdr->RVA <= Directory.Export->AddressOfFunctions) &&
-               (Directory.Export->AddressOfFunctions + ExportTableSize < SectionHdr->RVA + SectionSize)) )
+        if (!REGION_IN_REGION(Directory.Export->AddressOfFunctions,
+                              ExportTableSize,
+                              SectionHdr->RVA,
+                              SectionSize))
         {
             /* Nope */
             PrintWarning("WARNING: Could not load the export table, ignoring...\n");
@@ -1367,9 +1368,13 @@ ProcessPEImage(
                 if (Directory.Debug->PointerToRawData != 0)
                 {
                     /* The debug data must be within the debug directory's section */
-                    if ((SectionHdr->SeekOffset <= Directory.Debug->PointerToRawData) &&
-                        // (Directory.Debug->PointerToRawData < SectionHdr->SeekOffset + SectionHdr->OnDiskSize) &&
-                        (Directory.Debug->PointerToRawData + Directory.Debug->SizeOfData <= SectionHdr->SeekOffset + SectionHdr->OnDiskSize))
+                    if (/* ADDRESS_IN_REGION(Directory.Debug->PointerToRawData,
+                                             SectionHdr->SeekOffset,
+                                             SectionHdr->OnDiskSize) && */
+                        REGION_IN_REGION(Directory.Debug->PointerToRawData,
+                                         Directory.Debug->SizeOfData,
+                                         SectionHdr->SeekOffset,
+                                         SectionHdr->OnDiskSize))
                     {
                         /*
                          * The RAW debug data appears to be in the section the debug information belongs.
@@ -1407,9 +1412,13 @@ ProcessPEImage(
             }
 
             /* The debug data must be within the debug directory's section */
-            if ( !((SectionHdr->SeekOffset <= Directory.Debug->PointerToRawData) &&
-                // (Directory.Debug->PointerToRawData < SectionHdr->SeekOffset + SectionHdr->OnDiskSize) &&
-                   (Directory.Debug->PointerToRawData + Directory.Debug->SizeOfData <= SectionHdr->SeekOffset + SectionHdr->OnDiskSize)) )
+            if (/* !ADDRESS_IN_REGION(Directory.Debug->PointerToRawData,
+                                      SectionHdr->SeekOffset,
+                                      SectionHdr->OnDiskSize) || */
+                !REGION_IN_REGION(Directory.Debug->PointerToRawData,
+                                  Directory.Debug->SizeOfData,
+                                  SectionHdr->SeekOffset,
+                                  SectionHdr->OnDiskSize))
             {
                 PrintError("Debug data is not within the debug directory's section!\n");
                 IsOldDebug = FALSE; // Reset so that we don't do the conversion below.
@@ -1475,9 +1484,13 @@ ProcessPEImage(
             }
 
             /* The debug data must be within the debug directory's section */
-            if ( !((SectionHdr->SeekOffset <= DebugDirectory->PointerToRawData) &&
-                // (DebugDirectory->PointerToRawData < SectionHdr->SeekOffset + SectionHdr->OnDiskSize) &&
-                   (DebugDirectory->PointerToRawData + DebugDirectory->SizeOfData <= SectionHdr->SeekOffset + SectionHdr->OnDiskSize)) )
+            if (/* !ADDRESS_IN_REGION(DebugDirectory->PointerToRawData,
+                                      SectionHdr->SeekOffset,
+                                      SectionHdr->OnDiskSize) || */
+                !REGION_IN_REGION(DebugDirectory->PointerToRawData,
+                                  DebugDirectory->SizeOfData,
+                                  SectionHdr->SeekOffset,
+                                  SectionHdr->OnDiskSize))
             {
                 PrintError("Debug data is not within the debug directory's section!\n");
             }
@@ -1506,20 +1519,26 @@ ProcessPEImage(
             /*
              * The algorithm works as follows:
              *
+             * 0. Localize the actual beginning of the debug data (that follows
+             *    the debug directories) and see whether there exists enough
+             *    padding between it and the end of the directories. If so we
+             *    may be able to fit the new debug directories directly.
+             *
              * 1. Check whether we can move the data within the .debug section.
-             *    This is done by looking at the presence of at least **FIVE
-             *    trailing zero bytes** at the very end of the debug data.
+             *    This is done by looking at the presence of a certain number of
+             *    trailing zero bytes (as many needed for fitting the extra data
+             *    from the conversion of the debug directory) at the very end of
+             *    the debug data.
              *    If these are present, we are ensured that these are padding
              *    bytes (and not e.g. actual debug data, like an ULONG, that
              *    may need to be NULL).
              *    If found, then we can move the data, and upgrade the COFF_DEBUG_DIRECTORY
-             *    data to the newer IMAGE_DEBUG_DIRECTORY, which also happens to
-             *    be exactly 4 bytes larger than the older structure.
+             *    data to the newer IMAGE_DEBUG_DIRECTORY.
              *
-             * 2. If we cannot move the data, search for at least sizeof(IMAGE_DEBUG_DIRECTORY)
-             *    bytes of slack space at the end of, first, the .debug section,
-             *    and if not, any other existing initialized data section (i.e.
-             *    NOT .bss) or text section.
+             * 2. If we cannot move the data, search for at least "NewDirectorySize"
+             *    bytes of slack space at the end of any existing initialized data
+             *    section (i.e. NOT .bss) or text section, excepting the .debug section
+             *    (since we could not already find enough slack space for step 1).
              *    If found, then write the newer IMAGE_DEBUG_DIRECTORY.
              *
              * 3. If this is still not possible, try extending any last section
@@ -1532,13 +1551,23 @@ ProcessPEImage(
             ULONG i;
             BOOLEAN bConversionDone = FALSE;
 
+            C_ASSERT(sizeof(IMAGE_DEBUG_DIRECTORY) <= sizeof(COFF_DEBUG_DIRECTORY) + sizeof(ULONG));
+
+
+
+            /* Step 0: Localize the actual beginning and end of the debug data */
+
+
+
+
+
+
             /* Step 1: Can we move the data within the .debug section? */
 
             ULONG EndData = max(Directory.Debug->PointerToRawData + Directory.Debug->SizeOfData,
                                 SectionHdr->SeekOffset + SectionHdr->OnDiskSize);
             PUCHAR Padding;
 
-            C_ASSERT(sizeof(IMAGE_DEBUG_DIRECTORY) <= sizeof(COFF_DEBUG_DIRECTORY) + sizeof(ULONG));
             if (EndData - SectionHdr->SeekOffset > NewDirectorySize - DirectorySize + 1)
             {
                 Padding = (PUCHAR)RVA(Section, (EndData - (NewDirectorySize - DirectorySize + 1)) - SectionHdr->SeekOffset);
@@ -1590,212 +1619,202 @@ ProcessPEImage(
                 }
             }
 
-            /* Step 2: Search for slack space */
-            if (!bConversionDone)
+            /* Step 2: Search for slack space in other sections.
+             * We need to have a section table for this. */
+            if (!bConversionDone && ObjTable)
             {
-                // TODO: Look at the .debug section first (this is the current section).
+                ASSERT(NtHeader->NumberOfObjects);
+                ASSERT(SectionTable);
 
                 /* Loop over the sections to find some slack space */
-                if (ObjTable)
+                for (i = 0; i < NtHeader->NumberOfObjects; ++i)
                 {
-                    IMAGE_DEBUG_DIRECTORY DummyZero;
+                    /* Skip the .debug section */
+                    // if (SectionHdr == &ObjTable[i])
+                    if (SectionHdr->SeekOffset == ObjTable[i].SeekOffset)
+                        continue;
 
-                    ASSERT(NtHeader->NumberOfObjects);
-                    ASSERT(SectionTable);
-
-                    RtlZeroMemory(&DummyZero, sizeof(DummyZero));
-
-                    for (i = 0; i < NtHeader->NumberOfObjects; ++i)
-                    {
-                        /* Skip the .debug section */
-                        // if (SectionHdr == &ObjTable[i])
-                        if (SectionHdr->SeekOffset == ObjTable[i].SeekOffset)
-                            continue;
-
-                        /* Skip the .bss section */
-                        // Use the new PE converted section characteristics.
-                        // if (SectionTable[i].Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA)
-                        if (ObjTable[i].VirtualSize == 0 || ObjTable[i].OnDiskSize == 0)
-                            continue;
-
-                        /* Load the section */
-                        if (!LoadOldPESectionFromFile(pImageFile,
-                                                      &ObjTable[i],
-                                                      &TmpSection,
-                                                      NULL))
-                        {
-                            /* Just skip this section. No need to display errors
-                             * since LoadOldPESectionFromFile() does that already. */
-                            continue;
-                        }
-                        ASSERT(TmpSection);
-
-                        /*
-                         * Heuristics:
-                         * Search for sizeof(IMAGE_DEBUG_DIRECTORY) + 2 bytes slack space.
-                         * The "+ 2 bytes" ensures that if there is some extra data before
-                         * e.g. a string that needs to be NULL-terminated, this data remains fine.
-                         */
-                        EndData = ObjTable[i].SeekOffset + ObjTable[i].OnDiskSize;
-
-                        if (EndData - ObjTable[i].SeekOffset >= sizeof(IMAGE_DEBUG_DIRECTORY) + 2)
-                        {
-                            Padding = (PUCHAR)RVA(TmpSection, (EndData - sizeof(IMAGE_DEBUG_DIRECTORY) - 2) - ObjTable[i].SeekOffset);
-
-                            if (IsZeroMemory(Padding, sizeof(IMAGE_DEBUG_DIRECTORY) + 2))
-                            {
-                                /* Add the debug directory */
-                                DebugDirectory = (PIMAGE_DEBUG_DIRECTORY)&Padding[2];
-                                DebugDirectory->Characteristics  = Directory.Debug->Characteristics;
-                                DebugDirectory->TimeDateStamp    = FileHeader->TimeDateStamp;
-                                DebugDirectory->MajorVersion     = LOWORD(Directory.Debug->VersionStamp);
-                                DebugDirectory->MinorVersion     = HIWORD(Directory.Debug->VersionStamp);
-                                DebugDirectory->Type             = Directory.Debug->Type;
-                                DebugDirectory->SizeOfData       = Directory.Debug->SizeOfData;
-                                DebugDirectory->AddressOfRawData = Directory.Debug->AddressOfRawData;  // FIXME!
-                                DebugDirectory->PointerToRawData = Directory.Debug->PointerToRawData;  // FIXME!
-
-                                if (!FlushOldPESectionToFile(pDestFile, &ObjTable[i], TmpSection))
-                                {
-                                    /* Use the new PE converted section for the name */
-                                    PrintError("Failed to update the '%.*s' section!\n",
-                                               (ULONG)RTL_NUMBER_OF(SectionTable[i].Name), SectionTable[i].Name);
-                                }
-                                else
-                                {
-                                    /* Modify the directory entry */
-                                    OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress =
-                                     NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].RVA =
-                                        (ULONG)RVA(ObjTable[i].RVA, (ULONG_PTR)DebugDirectory - (ULONG_PTR)TmpSection);
-
-                                    OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size =
-                                     NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size = sizeof(*DebugDirectory);
-
-                                    bConversionDone = TRUE;
-                                }
-                            }
-                        }
-
-                        /* Free the allocated section */
-                        free(TmpSection);
-
-                        /* Break if we are done */
-                        if (bConversionDone)
-                            break;
-                    }
-                }
-            }
-
-            /* Step 3: Extend the last section */
-            if (!bConversionDone)
-            {
-                if (ObjTable)
-                {
-                    PIMAGE_OBJECT_HEADER LastSectionHdr;
-                    size_t NewSectionSize;
-
-                    ASSERT(NtHeader->NumberOfObjects);
-                    ASSERT(SectionTable);
-
-                    /* Find the last section in the file; we do not rely on whether
-                     * or not they are already sorted in the section table. */
-                    LastSectionHdr = &ObjTable[0];
-                    for (i = 0; i < NtHeader->NumberOfObjects; ++i)
-                    {
-                        if (LastSectionHdr->SeekOffset < ObjTable[i].SeekOffset)
-                            LastSectionHdr = &ObjTable[i];
-                    }
-                    /* Recalculate the 'i' corresponding to LastSectionHdr for later purposes */
-                    i = (ULONG)(LastSectionHdr - ObjTable);
-
-                    /* If this is the .bss section, skip it */
+                    /* Skip the .bss section */
                     // Use the new PE converted section characteristics.
                     // if (SectionTable[i].Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA)
-                    if (LastSectionHdr->VirtualSize == 0 || LastSectionHdr->OnDiskSize == 0)
-                        goto StopStep3;
+                    if (ObjTable[i].VirtualSize == 0 || ObjTable[i].OnDiskSize == 0)
+                        continue;
 
-                    /* Load the last section */
+                    /* Load the section */
                     if (!LoadOldPESectionFromFile(pImageFile,
-                                                  LastSectionHdr,
+                                                  &ObjTable[i],
                                                   &TmpSection,
-                                                  &TmpSectionSize))
+                                                  NULL))
                     {
                         /* Just skip this section. No need to display errors
                          * since LoadOldPESectionFromFile() does that already. */
-                        goto StopStep3;
+                        continue;
                     }
                     ASSERT(TmpSection);
 
-
                     /*
-                     * LoadOldPESectionFromFile() allocated a section buffer, of size equals to the
-                     * max(VirtualSize, OnDiskSize) (size returned in TmpSectionSize), so we will
-                     * need to re-allocate it only if OnDiskSize + sizeof(IMAGE_DEBUG_DIRECTORY)
-                     * is > TmpSectionSize.
+                     * Heuristics:
+                     * Search for sizeof(IMAGE_DEBUG_DIRECTORY) + 2 bytes slack space.
+                     * The "+ 2 bytes" ensures that if there is some extra data before
+                     * e.g. a string that needs to be NULL-terminated, this data remains fine.
                      */
-                    if (LastSectionHdr->OnDiskSize + sizeof(IMAGE_DEBUG_DIRECTORY) > TmpSectionSize)
-                    {
-                        PVOID ptr;
+                    EndData = ObjTable[i].SeekOffset + ObjTable[i].OnDiskSize;
 
-                        /* Enlarge the section buffer */
-                        NewSectionSize = ROUND_UP(TmpSectionSize + sizeof(IMAGE_DEBUG_DIRECTORY), NtHeader->FileAlign);
-                        ptr = realloc(TmpSection, NewSectionSize);
-                        if (!ptr)
+                    if (EndData - ObjTable[i].SeekOffset >= sizeof(IMAGE_DEBUG_DIRECTORY) + 2)
+                    {
+                        Padding = (PUCHAR)RVA(TmpSection, (EndData - sizeof(IMAGE_DEBUG_DIRECTORY) - 2) - ObjTable[i].SeekOffset);
+
+                        if (IsZeroMemory(Padding, sizeof(IMAGE_DEBUG_DIRECTORY) + 2))
                         {
-                            PrintError("Failed to re-allocate %lu bytes for the '%.*s' section\n",
-                                       (ULONG)NewSectionSize,
-                                       (ULONG)RTL_NUMBER_OF(SectionTable[i].Name), SectionTable[i].Name);
+                            /* Add the debug directory */
+                            DebugDirectory = (PIMAGE_DEBUG_DIRECTORY)&Padding[2];
+                            DebugDirectory->Characteristics  = Directory.Debug->Characteristics;
+                            DebugDirectory->TimeDateStamp    = FileHeader->TimeDateStamp;
+                            DebugDirectory->MajorVersion     = LOWORD(Directory.Debug->VersionStamp);
+                            DebugDirectory->MinorVersion     = HIWORD(Directory.Debug->VersionStamp);
+                            DebugDirectory->Type             = Directory.Debug->Type;
+                            DebugDirectory->SizeOfData       = Directory.Debug->SizeOfData;
+                            DebugDirectory->AddressOfRawData = Directory.Debug->AddressOfRawData;  // FIXME!
+                            DebugDirectory->PointerToRawData = Directory.Debug->PointerToRawData;  // FIXME!
 
-                            free(TmpSection);
-                            goto StopStep3;
+                            if (!FlushOldPESectionToFile(pDestFile, &ObjTable[i], TmpSection))
+                            {
+                                /* Use the new PE converted section for the name */
+                                PrintError("Failed to update the '%.*s' section!\n",
+                                           (ULONG)RTL_NUMBER_OF(SectionTable[i].Name), SectionTable[i].Name);
+                            }
+                            else
+                            {
+                                /* Modify the directory entry */
+                                OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress =
+                                 NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].RVA =
+                                    (ULONG)RVA(ObjTable[i].RVA, (ULONG_PTR)DebugDirectory - (ULONG_PTR)TmpSection);
+
+                                OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size =
+                                 NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size = sizeof(*DebugDirectory);
+
+                                bConversionDone = TRUE;
+                            }
                         }
-                        TmpSection = ptr;
-
-                        /* Zero out the slack space */
-                        RtlZeroMemory(RVA(TmpSection, TmpSectionSize),
-                                      NewSectionSize - TmpSectionSize);
-                    }
-
-                    /* Add the debug directory */
-                    DebugDirectory = (PIMAGE_DEBUG_DIRECTORY)RVA(TmpSection, LastSectionHdr->OnDiskSize);
-
-                    LastSectionHdr->OnDiskSize = ROUND_UP(LastSectionHdr->OnDiskSize + sizeof(IMAGE_DEBUG_DIRECTORY), NtHeader->FileAlign);
-                    // LastSectionHdr->VirtualSize; // FIXME??
-
-                    DebugDirectory->Characteristics  = Directory.Debug->Characteristics;
-                    DebugDirectory->TimeDateStamp    = FileHeader->TimeDateStamp;
-                    DebugDirectory->MajorVersion     = LOWORD(Directory.Debug->VersionStamp);
-                    DebugDirectory->MinorVersion     = HIWORD(Directory.Debug->VersionStamp);
-                    DebugDirectory->Type             = Directory.Debug->Type;
-                    DebugDirectory->SizeOfData       = Directory.Debug->SizeOfData;
-                    DebugDirectory->AddressOfRawData = Directory.Debug->AddressOfRawData;
-                    DebugDirectory->PointerToRawData = Directory.Debug->PointerToRawData;
-
-                    if (!FlushOldPESectionToFile(pDestFile, LastSectionHdr, TmpSection))
-                    {
-                        /* Use the new PE converted section for the name */
-                        PrintError("Failed to update the '%.*s' section!\n",
-                                   (ULONG)RTL_NUMBER_OF(SectionTable[i].Name), SectionTable[i].Name);
-                    }
-                    else
-                    {
-                        /* Modify the directory entry */
-                        OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress =
-                         NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].RVA =
-                            (ULONG)RVA(LastSectionHdr->RVA, (ULONG_PTR)DebugDirectory - (ULONG_PTR)TmpSection);
-
-                        OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size =
-                         NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size = sizeof(*DebugDirectory);
-
-                        bConversionDone = TRUE;
                     }
 
                     /* Free the allocated section */
                     free(TmpSection);
 
-                StopStep3:
-                    ;
+                    /* Break if we are done */
+                    if (bConversionDone)
+                        break;
                 }
+            }
+
+            /* Step 3: Extend the last section.
+             * We need to have a section table for this. */
+            if (!bConversionDone && ObjTable)
+            {
+                PIMAGE_OBJECT_HEADER LastSectionHdr;
+                size_t NewSectionSize;
+
+                ASSERT(NtHeader->NumberOfObjects);
+                ASSERT(SectionTable);
+
+                /* Find the last section in the file; we do not rely on whether
+                 * or not they are already sorted in the section table. */
+                LastSectionHdr = &ObjTable[0];
+                for (i = 0; i < NtHeader->NumberOfObjects; ++i)
+                {
+                    if (LastSectionHdr->SeekOffset < ObjTable[i].SeekOffset)
+                        LastSectionHdr = &ObjTable[i];
+                }
+                /* Recalculate the index corresponding to LastSectionHdr for later purposes */
+                i = (ULONG)(LastSectionHdr - ObjTable);
+
+                /* If this is the .bss section, skip it */
+                // Use the new PE converted section characteristics.
+                // if (SectionTable[i].Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA)
+                if (LastSectionHdr->VirtualSize == 0 || LastSectionHdr->OnDiskSize == 0)
+                    goto StopStep3;
+
+                /* Load the last section */
+                if (!LoadOldPESectionFromFile(pImageFile,
+                                              LastSectionHdr,
+                                              &TmpSection,
+                                              &TmpSectionSize))
+                {
+                    /* Just skip this section. No need to display errors
+                        * since LoadOldPESectionFromFile() does that already. */
+                    goto StopStep3;
+                }
+                ASSERT(TmpSection);
+
+
+                /*
+                 * LoadOldPESectionFromFile() allocated a section buffer, of size equals to the
+                 * max(VirtualSize, OnDiskSize) (size returned in TmpSectionSize), so we will
+                 * need to re-allocate it only if OnDiskSize + sizeof(IMAGE_DEBUG_DIRECTORY)
+                 * is > TmpSectionSize.
+                 */
+                if (LastSectionHdr->OnDiskSize + sizeof(IMAGE_DEBUG_DIRECTORY) > TmpSectionSize)
+                {
+                    PVOID ptr;
+
+                    /* Enlarge the section buffer */
+                    NewSectionSize = ROUND_UP(TmpSectionSize + sizeof(IMAGE_DEBUG_DIRECTORY), NtHeader->FileAlign);
+                    ptr = realloc(TmpSection, NewSectionSize);
+                    if (!ptr)
+                    {
+                        PrintError("Failed to re-allocate %lu bytes for the '%.*s' section\n",
+                                   (ULONG)NewSectionSize,
+                                   (ULONG)RTL_NUMBER_OF(SectionTable[i].Name), SectionTable[i].Name);
+
+                        free(TmpSection);
+                        goto StopStep3;
+                    }
+                    TmpSection = ptr;
+
+                    /* Zero out the slack space */
+                    RtlZeroMemory(RVA(TmpSection, TmpSectionSize),
+                                  NewSectionSize - TmpSectionSize);
+                }
+
+                /* Add the debug directory */
+                DebugDirectory = (PIMAGE_DEBUG_DIRECTORY)RVA(TmpSection, LastSectionHdr->OnDiskSize);
+
+                LastSectionHdr->OnDiskSize = ROUND_UP(LastSectionHdr->OnDiskSize + sizeof(IMAGE_DEBUG_DIRECTORY), NtHeader->FileAlign);
+                // LastSectionHdr->VirtualSize; // FIXME??
+
+                DebugDirectory->Characteristics  = Directory.Debug->Characteristics;
+                DebugDirectory->TimeDateStamp    = FileHeader->TimeDateStamp;
+                DebugDirectory->MajorVersion     = LOWORD(Directory.Debug->VersionStamp);
+                DebugDirectory->MinorVersion     = HIWORD(Directory.Debug->VersionStamp);
+                DebugDirectory->Type             = Directory.Debug->Type;
+                DebugDirectory->SizeOfData       = Directory.Debug->SizeOfData;
+                DebugDirectory->AddressOfRawData = Directory.Debug->AddressOfRawData;
+                DebugDirectory->PointerToRawData = Directory.Debug->PointerToRawData;
+
+                if (!FlushOldPESectionToFile(pDestFile, LastSectionHdr, TmpSection))
+                {
+                    /* Use the new PE converted section for the name */
+                    PrintError("Failed to update the '%.*s' section!\n",
+                               (ULONG)RTL_NUMBER_OF(SectionTable[i].Name), SectionTable[i].Name);
+                }
+                else
+                {
+                    /* Modify the directory entry */
+                    OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress =
+                     NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].RVA =
+                        (ULONG)RVA(LastSectionHdr->RVA, (ULONG_PTR)DebugDirectory - (ULONG_PTR)TmpSection);
+
+                    OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size =
+                     NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size = sizeof(*DebugDirectory);
+
+                    bConversionDone = TRUE;
+                }
+
+                /* Free the allocated section */
+                free(TmpSection);
+
+            StopStep3:
+                ;
             }
 
             if (!bConversionDone)

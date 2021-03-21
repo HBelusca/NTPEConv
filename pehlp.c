@@ -17,8 +17,8 @@
 #include "pecoff.h"
 #include "nt196pe.h"
 
-
 #include "ntpeconv.h"
+#include "pehlp.h"
 
 
 /**
@@ -186,8 +186,9 @@ LoadOldPEDirectoryEntryAndSection(
     SectionHdr = NULL;
     for (i = 0; i < NtHeader->NumberOfObjects; ++i)
     {
-        if ((ObjTable[i].RVA <= DirectoryEntry->RVA) &&
-            (DirectoryEntry->RVA < ObjTable[i].RVA + ObjTable[i].VirtualSize))
+        if (ADDRESS_IN_REGION(DirectoryEntry->RVA,
+                              ObjTable[i].RVA,
+                              ObjTable[i].VirtualSize))
         {
             /* Found it */
             SectionHdr = &ObjTable[i];
@@ -211,8 +212,10 @@ LoadOldPEDirectoryEntryAndSection(
 
     /* Sanity check: Check that the directory data is
      * fully contained in the section, otherwise bail out. */
-    if ( !((SectionHdr->RVA <= DirectoryEntry->RVA) &&
-           (DirectoryEntry->RVA + DirectoryEntry->Size < SectionHdr->RVA + SectionSize)) )
+    if (!REGION_IN_REGION(DirectoryEntry->RVA,
+                          DirectoryEntry->Size,
+                          SectionHdr->RVA,
+                          SectionSize))
     {
         /* Nope */
         return NULL;
@@ -296,8 +299,9 @@ LoadNewPEDirectoryEntryAndSection(
     SectionHdr = NULL;
     for (i = 0; i < NtHeader->FileHeader.NumberOfSections; ++i)
     {
-        if ((ObjTable[i].VirtualAddress <= DirectoryEntry->VirtualAddress) &&
-            (DirectoryEntry->VirtualAddress < ObjTable[i].VirtualAddress + ObjTable[i].Misc.VirtualSize))
+        if (ADDRESS_IN_REGION(DirectoryEntry->VirtualAddress,
+                              ObjTable[i].VirtualAddress,
+                              ObjTable[i].Misc.VirtualSize))
         {
             /* Found it */
             SectionHdr = &ObjTable[i];
@@ -321,8 +325,10 @@ LoadNewPEDirectoryEntryAndSection(
 
     /* Sanity check: Check that the directory data is
      * fully contained in the section, otherwise bail out. */
-    if ( !((SectionHdr->VirtualAddress <= DirectoryEntry->VirtualAddress) &&
-           (DirectoryEntry->VirtualAddress + DirectoryEntry->Size < SectionHdr->VirtualAddress + SectionSize)) )
+    if (!REGION_IN_REGION(DirectoryEntry->VirtualAddress,
+                          DirectoryEntry->Size,
+                          SectionHdr->VirtualAddress,
+                          SectionSize))
     {
         /* Nope */
         return NULL;
@@ -404,7 +410,6 @@ FlushNewPESectionToFile(
 }
 
 
-
 BOOLEAN
 FixupExportsSectionWorker(
     IN OUT PIMAGE_EXPORT_DIRECTORY ExportDirectory,
@@ -431,8 +436,10 @@ FixupExportsSectionWorker(
 
     /* Sanity check: Check that the export function table is
      * fully contained in the section, otherwise bail out. */
-    if ( !((SectionRVA <= ExportDirectory->AddressOfNames) &&
-           (ExportDirectory->AddressOfNames + TableSize < SectionRVA + SectionSize)) )
+    if (!REGION_IN_REGION(ExportDirectory->AddressOfNames,
+                          TableSize,
+                          SectionRVA,
+                          SectionSize))
     {
         /* Nope */
         PrintWarning("WARNING: Could not load the export names table, ignoring...\n");
@@ -641,8 +648,9 @@ ReconstructSections(
             Characteristics = SectionFlags[SECTION_FLAGS_BSS].Characteristics;
         }
         /* Or a .text section, if the entry point is in it */
-        else if ((ObjTable[i].RVA <= NtHeader->EntryPointRVA) &&
-                 (NtHeader->EntryPointRVA < ObjTable[i].RVA + ObjTable[i].VirtualSize))
+        else if (ADDRESS_IN_REGION(NtHeader->EntryPointRVA,
+                                   ObjTable[i].RVA,
+                                   ObjTable[i].VirtualSize))
         {
             SectionName     = SectionFlags[SECTION_FLAGS_TEXT].SectionName;
             Characteristics = SectionFlags[SECTION_FLAGS_TEXT].Characteristics;
@@ -659,8 +667,9 @@ ReconstructSections(
                     continue;
                 }
 
-                if ((ObjTable[i].RVA <= NtHeader->DataDirectory[j].RVA) &&
-                    (NtHeader->DataDirectory[j].RVA < ObjTable[i].RVA + ObjTable[i].VirtualSize))
+                if (ADDRESS_IN_REGION(NtHeader->DataDirectory[j].RVA,
+                                      ObjTable[i].RVA,
+                                      ObjTable[i].VirtualSize))
                 {
                     /* Found a candidate */
                     break;
@@ -732,8 +741,9 @@ ReconstructSections(
                 ULONG Ordinal;
                 for (Ordinal = 0; Ordinal < ExportDirectory->NumberOfFunctions; ++Ordinal)
                 {
-                    if ((ObjTable[i].RVA <= ExportTable[Ordinal]) &&
-                        (ExportTable[Ordinal] < ObjTable[i].RVA + ObjTable[i].VirtualSize))
+                    if (ADDRESS_IN_REGION(ExportTable[Ordinal],
+                                          ObjTable[i].RVA,
+                                          ObjTable[i].VirtualSize))
                     {
                         SectionName     = SectionFlags[SECTION_FLAGS_TEXT].SectionName;
                         Characteristics = SectionFlags[SECTION_FLAGS_TEXT].Characteristics;
@@ -831,4 +841,19 @@ Quit:
     }
 
     return TRUE;
+}
+
+
+VOID
+PECheckSum()
+{
+    /*
+     * TODO
+     * See:
+     * https://git.reactos.org/?p=reactos.git;a=blob;f=dll/win32/imagehlp/modify.c;h=66ab07e745b35986b3ab723b030924d6eb390ca7;hb=HEAD#l158
+     * https://bytepointer.com/resources/microsoft_pe_checksum_algo_distilled.htm
+     * https://www.codeproject.com/Articles/19326/An-Analysis-of-the-Windows-PE-Checksum-Algorithm
+     * https://practicalsecurityanalytics.com/pe-checksum/
+     * https://github.com/mrexodia/portable-executable-library/blob/master/pe_lib/pe_checksum.cpp
+     */
 }

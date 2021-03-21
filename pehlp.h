@@ -10,6 +10,42 @@
 
 #pragma once
 
+#define RVA(b, m) ((PVOID)((ULONG_PTR)(b) + (ULONG_PTR)(m)))
+
+/**
+ * @brief   Checks whether Value is in the range [Start; End[.
+ **/
+#define VALUE_IN_RANGE(Value, Start, End) \
+    ( ((Start) <= (Value)) && ((Value) < (End)) )
+
+ /**
+  * @brief   Checks whether the region [RgnStart; RgnStart + RgnSize]
+  *          is fully contained in the range [Start; End].
+  **/
+#define REGION_IN_RANGE(RgnStart, RgnSize, Start, End) \
+    ( ((Start) <= (RgnStart)) && ((RgnStart) + (RgnSize) <= (End)) )
+
+/**
+ * @brief   Checks whether Addr is in the range [Start; End[.
+ **/
+#define ADDRESS_IN_RANGE(Addr, Start, End) \
+    VALUE_IN_RANGE((ULONG_PTR)(Addr), (ULONG_PTR)(Start), (ULONG_PTR)(End))
+
+/**
+ * @brief   Checks whether Addr is in the range [Start; Start + Size[.
+ **/
+#define ADDRESS_IN_REGION(Addr, Start, Size) \
+    VALUE_IN_RANGE((ULONG_PTR)(Addr), (ULONG_PTR)(Start), (ULONG_PTR)(Start) + (Size))
+
+/**
+ * @brief   Checks whether the region [RgnAddr; RgnAddr + RgnSize]
+ *          is fully contained in the region [Start; Start + Size].
+ **/
+#define REGION_IN_REGION(RgnAddr, RgnSize, Start, Size) \
+    REGION_IN_RANGE((ULONG_PTR)(RgnAddr), RgnSize, \
+                    (ULONG_PTR)(Start), (ULONG_PTR)(Start) + (Size))
+
+
 BOOLEAN
 LoadOldPESectionFromFile(
     IN FILE* pImageFile,
