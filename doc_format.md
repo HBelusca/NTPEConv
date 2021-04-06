@@ -31,10 +31,18 @@ _Copyright 2021 Hermès Bélusca-Maïto_
 
 ---
 
-These definitions have been extracted from the embedded debug symbols in the
+The definitions of the following structures have been extracted from the
+embedded debug symbols in the OS/2 build of the
 <img align="middle" alt="I386KD.ICO" src="doc/images/I386KD_32.bmp">
 `\I386\DEBUG\I386KD.EXE` executable of the NT PDK v1.196 release.
-They can also be found in the `\MSTOOLS\BIN\OS2\COFF.EXE` executable.
+They can also be found in the `\MSTOOLS\BIN\OS2\COFF.EXE` executable
+of the same release.
+
+_<u>TODO:</u> Write a paragraph about comparison of COFF.EXE symbols from
+I386, MIPS and OS2 subrepos. In particular, only the OS2 version has this
+old-school PE stuff (and not the new-PE format with `IMAGE_OPTIONAL_HEADER`
+etc.), while the MIPS has only the new-PE format stuff (and not the old-PE one).
+The I386 COFF.EXE doesn't have any symbols with which to compare._
 
 ## DOS_IMAGE_HEADER
 
@@ -212,7 +220,7 @@ Windows subsystem (GUI or CUI).
 
 <tr>
 <td colspan="2">
-<i>Value 3 is undefined</i>
+<i>Value 3 is undefined.</i>
 </td>
 </tr>
 
