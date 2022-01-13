@@ -2,7 +2,7 @@
  * PROJECT:     PE Converter for NT PDK v1.196 (September 1991) and PDK October 1991
  * LICENSE:     GPL-2.0+ (https://spdx.org/licenses/GPL-2.0+)
  * PURPOSE:     Helper functions for the old and new PE formats.
- * COPYRIGHT:   Copyright 2021 Hermès Bélusca-Maïto
+ * COPYRIGHT:   Copyright 2021-2022 HermÃ¨s BÃ©lusca-MaÃ¯to
  */
 
 #define _CRT_SECURE_NO_WARNINGS

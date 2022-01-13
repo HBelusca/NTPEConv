@@ -3,7 +3,7 @@
  * LICENSE:     GPL-2.0+ (https://spdx.org/licenses/GPL-2.0+)
  * PURPOSE:     Converts old-style PE format to newer format
  *              that can be recognized by modern tools.
- * COPYRIGHT:   Copyright 2021 Hermès Bélusca-Maïto
+ * COPYRIGHT:   Copyright 2021-2022 HermÃ¨s BÃ©lusca-MaÃ¯to
  */
 
 #define _CRT_SECURE_NO_WARNINGS
@@ -1907,7 +1907,7 @@ Banner(void)
 {
     printf("PE Converter for NT PDK v1.196 (September 1991) and PDK October 1991\n"
            "Version " VERSION "\n"
-           "Copyright " COPYRIGHT_YEARS " Hermès Bélusca-Maïto\n"
+           "Copyright " COPYRIGHT_YEARS " HermÃ¨s BÃ©lusca-MaÃ¯to\n"
            "Under GPL-2.0+ license (https://spdx.org/licenses/GPL-2.0+)\n"
            "\n");
 }

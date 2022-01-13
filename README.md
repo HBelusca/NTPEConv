@@ -2,7 +2,7 @@
 
 # NTPEConv
 
-Copyright 2021 Hermès Bélusca-Maïto, under the [GPL-2.0+](https://spdx.org/licenses/GPL-2.0+) license.
+Copyright 2021-2022 Hermès Bélusca-Maïto, under the [GPL-2.0+](https://spdx.org/licenses/GPL-2.0+) license.
 
 <!--
 <p align="center">

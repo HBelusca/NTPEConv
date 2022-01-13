@@ -2,7 +2,7 @@
  * PROJECT:     PE Converter for NT PDK v1.196 (September 1991) and PDK October 1991
  * LICENSE:     GPL-2.0+ (https://spdx.org/licenses/GPL-2.0+)
  * PURPOSE:     Old PE Format Type definitions used in NT PDK v1.196.
- * COPYRIGHT:   Copyright 2021 Hermès Bélusca-Maïto
+ * COPYRIGHT:   Copyright 2021-2022 HermÃ¨s BÃ©lusca-MaÃ¯to
  *
  * These definitions have been extracted from the
  * embedded debug symbols in the \I386\DEBUG\I386KD.EXE
