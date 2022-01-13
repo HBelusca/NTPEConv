@@ -153,38 +153,14 @@ Quit:
     return bSuccess;
 }
 
+
 /**
- * @brief   Dumps the DOS and old-style PE headers of a PE image.
+ * @brief   Dumps the DOS header of a PE image.
  **/
 static VOID
-DumpOldPEImage(
-    IN PDOS_IMAGE_HEADER DosHeader,
-    IN PIMAGE_HEADER NtHeader)
+DumpDOSHeader(
+    IN const DOS_IMAGE_HEADER* DosHeader)
 {
-    static PCSTR IMAGE_SPECIAL_DIRECTORY_NAMES[IMAGE_NUMBEROF_SPECIAL_DIRECTORY_ENTRIES] =
-    {
-        "IMAGE_DIRECTORY_ENTRY_EXPORT",
-        "IMAGE_DIRECTORY_ENTRY_IMPORT",
-        "IMAGE_DIRECTORY_ENTRY_RESOURCE",
-        "IMAGE_DIRECTORY_ENTRY_EXCEPTION",
-        "IMAGE_DIRECTORY_ENTRY_SECURITY",
-        "IMAGE_DIRECTORY_ENTRY_BASERELOC",
-        "IMAGE_DIRECTORY_ENTRY_DEBUG",
-        // "IMAGE_DIRECTORY_ENTRY_COPYRIGHT", // (x86 - specific), otherwise: "IMAGE_DIRECTORY_ENTRY_ARCHITECTURE"
-        // "IMAGE_DIRECTORY_ENTRY_GLOBALPTR"
-    };
-
-    PIMAGE_OBJECT_HEADER ObjTable = NULL;
-    ULONG i;
-
-    /* Get a pointer to the object table; the ObjectTableRVA has been already
-     * adjusted so that it systematically points just after the structure. */
-    if (NtHeader->ObjectTableRVA)
-    {
-        ASSERT(NtHeader->NumberOfObjects);
-        ObjTable = RVA(NtHeader, NtHeader->ObjectTableRVA);
-    }
-
     printf("DOS_IMAGE_HEADER\n"
            "================\n"
            "    e_magic     = 0x%04X '%c%c'\n"
@@ -229,6 +205,249 @@ DumpOldPEImage(
            DosHeader->e_res2[0], DosHeader->e_res2[1], DosHeader->e_res2[2], DosHeader->e_res2[3], DosHeader->e_res2[4],
            DosHeader->e_res2[5], DosHeader->e_res2[6], DosHeader->e_res2[7], DosHeader->e_res2[8], DosHeader->e_res2[9],
            DosHeader->e_lfanew);
+}
+
+/**
+ * @brief   Dumps the data directory of a COFF or an old-PE image.
+ *          By chance, the older IMAGE_SPECIAL_DIRECTORY structure is identical
+ *          to the newer IMAGE_DATA_DIRECTORY one, including the size and the
+ *          order of its members, so we can use the same function to dump both.
+ *          Adjustment of member names is controlled with the 'bOldPE' parameter.
+ **/
+static VOID
+DumpCOFFDataDirectory(
+    IN const IMAGE_DATA_DIRECTORY* DataDirectory,
+    IN ULONG NumberOfDirectories,
+    IN BOOLEAN bOldPE,
+    IN int PrintIndent)
+{
+    C_ASSERT(RTL_NUMBER_OF_FIELD(IMAGE_HEADER, DataDirectory) == IMAGE_NUMBEROF_SPECIAL_DIRECTORY_ENTRIES);
+    C_ASSERT(RTL_NUMBER_OF_FIELD(IMAGE_OPTIONAL_HEADER32, DataDirectory) == IMAGE_NUMBEROF_DIRECTORY_ENTRIES);
+
+    static PCSTR IMAGE_SPECIAL_DIRECTORY_NAMES[
+        max(IMAGE_NUMBEROF_SPECIAL_DIRECTORY_ENTRIES,
+            IMAGE_NUMBEROF_DIRECTORY_ENTRIES)] =
+    {
+        /* COFF/Old/New-PE Directories */
+        "IMAGE_DIRECTORY_ENTRY_EXPORT",
+        "IMAGE_DIRECTORY_ENTRY_IMPORT",
+        "IMAGE_DIRECTORY_ENTRY_RESOURCE",
+        "IMAGE_DIRECTORY_ENTRY_EXCEPTION",
+        "IMAGE_DIRECTORY_ENTRY_SECURITY",
+        "IMAGE_DIRECTORY_ENTRY_BASERELOC",
+        "IMAGE_DIRECTORY_ENTRY_DEBUG",
+
+        /* New-PE Directories only */
+        "IMAGE_DIRECTORY_ENTRY_COPYRIGHT", // (x86-specific), otherwise: "IMAGE_DIRECTORY_ENTRY_ARCHITECTURE"
+        "IMAGE_DIRECTORY_ENTRY_GLOBALPTR"
+        "IMAGE_DIRECTORY_ENTRY_TLS",
+        "IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG",
+        "IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT",
+        "IMAGE_DIRECTORY_ENTRY_IAT",
+        "IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT",
+        "IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR",
+    };
+
+    ULONG MaxNumberOfDirectories;
+    ULONG i;
+
+    if (bOldPE)
+        MaxNumberOfDirectories = IMAGE_NUMBEROF_SPECIAL_DIRECTORY_ENTRIES;
+    else
+        MaxNumberOfDirectories = IMAGE_NUMBEROF_DIRECTORY_ENTRIES;
+
+    /* Verify that the handled number of special data directories is valid */
+    if (NumberOfDirectories > MaxNumberOfDirectories)
+    {
+        PrintWarning("Invalid number of special data directories %lu; expected <= %lu",
+                     NumberOfDirectories, MaxNumberOfDirectories);
+        NumberOfDirectories = MaxNumberOfDirectories;
+    }
+
+    for (i = 0; i < NumberOfDirectories; ++i)
+    {
+        printf("%*sDataDirectory[%s] =\n"
+               "%*s    { %s: 0x%08X , Size: 0x%08X }\n",
+               PrintIndent, "", // Indentation
+               IMAGE_SPECIAL_DIRECTORY_NAMES[i],
+               PrintIndent, "", // Indentation
+               (bOldPE ? "RVA" : "VirtualAddress"),
+               DataDirectory[i].VirtualAddress,
+               DataDirectory[i].Size);
+    }
+    printf("\n");
+}
+
+/**
+ * @brief   Dumps the COFF headers of a COFF image.
+ **/
+static VOID
+DumpCOFFImage(
+    IN const IMAGE_FILE_HEADER* FileHeader)
+{
+    PIMAGE_OPTIONAL_HEADER32 OptHeader = NULL;
+    PIMAGE_SECTION_HEADER ObjTable = NULL; // SectionTable
+    ULONG i;
+
+    /* Get a pointer to the optional header; the ObjectTableRVA has been already
+     * adjusted so that it systematically points just after the structure. */
+    if (FileHeader->SizeOfOptionalHeader)
+    {
+        OptHeader = (PVOID)(FileHeader + 1);
+    }
+
+    /* In the COFF format, it is understood that, as soon as NumberOfSections
+     * is non zero, there is an object/section table that is present just
+     * after the optional header. */
+    if (FileHeader->NumberOfSections)
+    {
+        // SectionTable
+        ObjTable = RVA(FileHeader + 1, FileHeader->SizeOfOptionalHeader);
+    }
+
+    printf("IMAGE_FILE_HEADER\n"
+           "=================\n"
+           "    Machine                 = 0x%04X\n"
+           "    NumberOfSections        = 0x%04X\n"
+           "    TimeDateStamp           = 0x%08X\n"
+           "    PointerToSymbolTable    = 0x%08X\n"
+           "    NumberOfSymbols         = 0x%08X\n"
+           "    SizeOfOptionalHeader    = 0x%04X\n"
+           "    Characteristics         = 0x%04X\n"
+           "\n",
+           FileHeader->Machine,
+           FileHeader->NumberOfSections,
+           FileHeader->TimeDateStamp,
+           FileHeader->PointerToSymbolTable,
+           FileHeader->NumberOfSymbols,
+           FileHeader->SizeOfOptionalHeader,
+           FileHeader->Characteristics);
+
+    if (OptHeader)
+    {
+        printf("IMAGE_OPTIONAL_HEADER32\n"
+               "=======================\n"
+               "    Magic                       = 0x%04X\n"
+               "    MajorLinkerVersion          = 0x%02X\n"
+               "    MinorLinkerVersion          = 0x%02X\n"
+               "    SizeOfCode                  = 0x%08X\n"
+               "    SizeOfInitializedData       = 0x%08X\n"
+               "    SizeOfUninitializedData     = 0x%08X\n"
+               "    AddressOfEntryPoint         = 0x%08X\n"
+               "    BaseOfCode                  = 0x%08X\n"
+               "    BaseOfData                  = 0x%08X\n"
+               "    ImageBase                   = 0x%08X\n"
+               "    SectionAlignment            = 0x%08X\n"
+               "    FileAlignment               = 0x%08X\n"
+               "    MajorOperatingSystemVersion = 0x%04X\n"
+               "    MinorOperatingSystemVersion = 0x%04X\n"
+               "    MajorImageVersion           = 0x%04X\n"
+               "    MinorImageVersion           = 0x%04X\n"
+               "    MajorSubsystemVersion       = 0x%04X\n"
+               "    MinorSubsystemVersion       = 0x%04X\n"
+               "    Win32VersionValue           = 0x%08X\n"
+               "    SizeOfImage                 = 0x%08X\n"
+               "    SizeOfHeaders               = 0x%08X\n"
+               "    CheckSum                    = 0x%08X\n"
+               "    Subsystem                   = 0x%04X\n"
+               "    DllCharacteristics          = 0x%04X\n"
+               "    SizeOfStackReserve          = 0x%08X\n"
+               "    SizeOfStackCommit           = 0x%08X\n"
+               "    SizeOfHeapReserve           = 0x%08X\n"
+               "    SizeOfHeapCommit            = 0x%08X\n"
+               "    LoaderFlags                 = 0x%08X\n"
+               "    NumberOfRvaAndSizes         = 0x%08X\n"
+               "\n",
+               OptHeader->Magic,
+               OptHeader->MajorLinkerVersion,
+               OptHeader->MinorLinkerVersion,
+               OptHeader->SizeOfCode,
+               OptHeader->SizeOfInitializedData,
+               OptHeader->SizeOfUninitializedData,
+               OptHeader->AddressOfEntryPoint,
+               OptHeader->BaseOfCode,
+               OptHeader->BaseOfData,
+               OptHeader->ImageBase,
+               OptHeader->SectionAlignment,
+               OptHeader->FileAlignment,
+               OptHeader->MajorOperatingSystemVersion,
+               OptHeader->MinorOperatingSystemVersion,
+               OptHeader->MajorImageVersion,
+               OptHeader->MinorImageVersion,
+               OptHeader->MajorSubsystemVersion,
+               OptHeader->MinorSubsystemVersion,
+               OptHeader->Win32VersionValue,
+               OptHeader->SizeOfImage,
+               OptHeader->SizeOfHeaders,
+               OptHeader->CheckSum,
+               OptHeader->Subsystem,
+               OptHeader->DllCharacteristics,
+               OptHeader->SizeOfStackReserve,
+               OptHeader->SizeOfStackCommit,
+               OptHeader->SizeOfHeapReserve,
+               OptHeader->SizeOfHeapCommit,
+               OptHeader->LoaderFlags,
+               OptHeader->NumberOfRvaAndSizes);
+
+        DumpCOFFDataDirectory(OptHeader->DataDirectory,
+                              OptHeader->NumberOfRvaAndSizes,
+                              FALSE,
+                              4);
+    }
+
+    if (ObjTable)
+    {
+        printf("Sections:\n"
+               "=========\n");
+        for (i = 0; i < FileHeader->NumberOfSections; ++i)
+        {
+            printf("[%lu] -->\n"
+                   "    Name                 = '%.*s'\n"
+                   "    Misc.VirtualSize     = 0x%08X\n"
+                   "    VirtualAddress       = 0x%08X\n"
+                   "    SizeOfRawData        = 0x%08X\n"
+                   "    PointerToRawData     = 0x%08X\n"
+                   "    PointerToRelocations = 0x%08X\n"
+                   "    PointerToLinenumbers = 0x%08X\n"
+                   "    NumberOfRelocations  = 0x%04X\n"
+                   "    NumberOfLinenumbers  = 0x%04X\n"
+                   "    Characteristics      = 0x%08X\n",
+                   i,
+                   (ULONG)RTL_NUMBER_OF(ObjTable[i].Name), ObjTable[i].Name,
+                   ObjTable[i].Misc.VirtualSize,
+                   ObjTable[i].VirtualAddress,
+                   ObjTable[i].SizeOfRawData,
+                   ObjTable[i].PointerToRawData,
+                   ObjTable[i].PointerToRelocations,
+                   ObjTable[i].PointerToLinenumbers,
+                   ObjTable[i].NumberOfRelocations,
+                   ObjTable[i].NumberOfLinenumbers,
+                   ObjTable[i].Characteristics);
+        }
+        printf("\n");
+    }
+}
+
+/**
+ * @brief   Dumps the DOS and old-style PE headers of a PE image.
+ **/
+static VOID
+DumpOldPEImage(
+    IN const DOS_IMAGE_HEADER* DosHeader,
+    IN const IMAGE_HEADER* NtHeader)
+{
+    PIMAGE_OBJECT_HEADER ObjTable = NULL;
+    ULONG i;
+
+    /* Get a pointer to the object table; the ObjectTableRVA has been already
+     * adjusted so that it systematically points just after the structure. */
+    if (NtHeader->ObjectTableRVA)
+    {
+        ASSERT(NtHeader->NumberOfObjects);
+        ObjTable = RVA(NtHeader, NtHeader->ObjectTableRVA);
+    }
+
+    DumpDOSHeader(DosHeader);
 
     printf("IMAGE_HEADER\n"
            "============\n"
@@ -307,15 +526,10 @@ DumpOldPEImage(
            NtHeader->Reserved5,
            NtHeader->NumberOfSpecialRVAs);
 
-    for (i = 0; i < NtHeader->NumberOfSpecialRVAs; ++i)
-    {
-        printf("    DataDirectory[%s] =\n"
-               "        { RVA: 0x%08X , Size: 0x%08X }\n",
-               IMAGE_SPECIAL_DIRECTORY_NAMES[i],
-               NtHeader->DataDirectory[i].RVA,
-               NtHeader->DataDirectory[i].Size);
-    }
-    printf("\n");
+    DumpCOFFDataDirectory((PIMAGE_DATA_DIRECTORY)NtHeader->DataDirectory,
+                          NtHeader->NumberOfSpecialRVAs,
+                          TRUE,
+                          4);
 
     if (ObjTable)
     {
@@ -341,6 +555,317 @@ DumpOldPEImage(
         printf("\n");
     }
 }
+
+/**
+ * @brief   Dumps the DOS and new-style PE headers of a PE image.
+ **/
+static VOID
+DumpNewPEImage(
+    IN const DOS_IMAGE_HEADER* DosHeader,
+    IN const IMAGE_NT_HEADERS32* NtHeaders)
+{
+    DumpDOSHeader(DosHeader);
+
+    printf("IMAGE_NT_HEADERS32\n"
+           "==================\n"
+           "    Signature   = 0x%08X '%c%c%c%c'\n"
+           "\n",
+           NtHeaders->Signature,
+           PRINT_VAR_CHAR(NtHeaders->Signature, 0), PRINT_VAR_CHAR(NtHeaders->Signature, 1),
+           PRINT_VAR_CHAR(NtHeaders->Signature, 2), PRINT_VAR_CHAR(NtHeaders->Signature, 3));
+
+    DumpCOFFImage(&NtHeaders->FileHeader);
+}
+
+
+
+/**
+ * @brief   Parses an COFF32 image and retrieves its headers. Validation and
+ *          sanitization are performed.
+ *          Returns TRUE if success, FALSE if failure (validation failed, or
+ *          any other error happened).
+ *          Please note that, for ease of re-use in the new-PE parser, this
+ *          function always returns a pointer to an allocated IMAGE_NT_HEADERS32
+ *          buffer, even if the image is **NOT** a PE, but is only a COFF.
+ *          This is done so that any optional header is automatically allocated
+ *          contiguously to the file header.
+ *
+ * Sanitization includes:
+ *
+ * - Making NumberOfObjects and ObjectTableRVA fields consistent.
+ *
+ * - Making NumberOfDirectives and DirectiveTableRVA fields consistent.
+ *   (NOTE: Unimplemented since PE executable images should have these fields
+ *   empty, otherwise an error is emitted.)
+ **/
+static BOOLEAN
+ParseCOFF32Image(
+    // IN PVOID pData,
+    IN FILE* pImageFile,
+    IN size_t nFileSize,
+    IN long nFileOffset,
+    OUT PIMAGE_NT_HEADERS32* pNtHeaders,
+    OUT PULONG pNtHeadersSize)
+{
+    PIMAGE_NT_HEADERS32 NtHeaders = NULL;
+    PIMAGE_FILE_HEADER FileHeader;
+    PIMAGE_OPTIONAL_HEADER32 OptHeader = NULL;
+    PIMAGE_SECTION_HEADER ObjTable = NULL; // SectionTable
+    size_t NtHeadersSize;
+    size_t TotalHeadersSize = 0;
+    size_t DataDirectorySize = 0;
+    size_t ObjectsTableSize = 0;
+
+    /* Make sure the image header fits into the size */
+    if (nFileSize < nFileOffset + sizeof(IMAGE_FILE_HEADER))
+    {
+        PrintErrorReason(ErrorInvalidPE, "File smaller than IMAGE_FILE_HEADER size");
+        // PrintErrorReason(ErrorMalformedPE, "COFF file header beyond image size");
+        return FALSE;
+    }
+
+    NtHeadersSize = RTL_SIZEOF_THROUGH_FIELD(IMAGE_NT_HEADERS32, FileHeader);
+
+    /* Allocate memory for the image file header (+ the extra signature field)
+     * and load it. It will be re-allocated later to accomodate for the extra
+     * optional header (and its directory array) and the object/sections table. */
+    NtHeaders = malloc(NtHeadersSize);
+    if (!NtHeaders)
+    {
+        PrintError("Failed to allocate %lu bytes\n", (ULONG)NtHeadersSize);
+        return FALSE;
+    }
+    fseek(pImageFile, nFileOffset, SEEK_SET);
+    if (!fread(&NtHeaders->FileHeader, sizeof(IMAGE_FILE_HEADER), 1, pImageFile))
+    {
+        PrintError("Failed to read %lu bytes from source file\n", (ULONG)sizeof(IMAGE_FILE_HEADER));
+        goto Failure;
+    }
+
+    FileHeader = &NtHeaders->FileHeader;
+
+    /* Ensure this is an executable image */
+    if ((NtHeaders->FileHeader.Characteristics & IMAGE_FILE_EXECUTABLE_IMAGE) == 0)
+    {
+        PrintErrorReason(ErrorInvalidPE, "Invalid executable image!");
+        goto Failure;
+    }
+
+    /* Stamp the signature with 'COFF', to distinguish with new PE files */
+    NtHeaders->Signature = 'COFF';
+
+
+    /* Symbols are not currently supported */
+    if ((FileHeader->NumberOfSymbols != 0) || (FileHeader->PointerToSymbolTable != 0))
+    {
+        PrintErrorReason(ErrorUnsupportedPE, "Symbols present in PE image, currently not supported (ignored)");
+        // goto Failure;
+    }
+
+
+    //
+    // TODO: Validate FileHeader->SizeOfOptionalHeader value ??
+    //
+
+    /* Check for the presence of the optional header */
+    if (FileHeader->SizeOfOptionalHeader == 0)
+    {
+        PrintWarning("Unsupported PE image (no optional header)!\n");
+    }
+
+    /* Make sure the optional file header fits into the size */
+    TotalHeadersSize = nFileOffset + sizeof(IMAGE_FILE_HEADER);
+    TotalHeadersSize += FileHeader->SizeOfOptionalHeader;
+    if (TotalHeadersSize >= nFileSize)
+    {
+        PrintError("NT optional header beyond image size!\n");
+        goto Failure;
+    }
+
+    NtHeadersSize += FileHeader->SizeOfOptionalHeader;
+
+    /*
+     * Perform any necessary re-allocation to accomodate for the optional header,
+     * the Data directory array and objects table.
+     */
+    // if (NtHeadersSize > (size_t)FIELD_OFFSET(IMAGE_HEADER, DataDirectory))
+    if (FileHeader->SizeOfOptionalHeader > 0)
+    {
+        /* Re-allocate the NT PE header to accomodate for the optional header,
+         * the Data directory array and the object table. */
+        PVOID ptr = realloc(NtHeaders, NtHeadersSize);
+        if (!ptr)
+        {
+            PrintError("Failed to re-allocate %lu bytes\n", (ULONG)NtHeadersSize);
+            goto Failure;
+        }
+        NtHeaders = ptr;
+        FileHeader = &NtHeaders->FileHeader;
+        OptHeader  = &NtHeaders->OptionalHeader;
+
+        /* Load the optional header */
+        fseek(pImageFile,
+           // nFileOffset + sizeof(IMAGE_FILE_HEADER),
+              nFileOffset + FIELD_OFFSET(IMAGE_NT_HEADERS32, OptionalHeader)
+                          - FIELD_OFFSET(IMAGE_NT_HEADERS32, FileHeader),
+              SEEK_SET);
+        if (!fread(OptHeader, FileHeader->SizeOfOptionalHeader, 1, pImageFile))
+        {
+            PrintError("Failed to read %lu bytes from source file\n", (ULONG)FileHeader->SizeOfOptionalHeader);
+            goto Failure;
+        }
+
+
+        /* Retrieve the optional header and be sure that its size corresponds to its signature */
+        // OptHeader->pHdr = (PVOID)(*pFileHeader + 1);
+        if (!(FileHeader->SizeOfOptionalHeader == sizeof(IMAGE_OPTIONAL_HEADER32) &&
+              OptHeader/*->p32*/->Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) &&
+            !(/* FileHeader->SizeOfOptionalHeader == sizeof(IMAGE_OPTIONAL_HEADER64) && */
+              OptHeader/*->p64*/->Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC))
+        {
+            /* Fail */
+            PrintError("Invalid or unrecognized NT optional header!\n");
+            goto Failure;
+        }
+
+
+        /*
+         * The total size of headers reported is equal to the combined size of:
+         * the original DOS header size (+ its DOS stub), PE header, and section headers.
+         * Contrary to the case of the new PE format, the old PE format does not
+         * round it up to a multiple of FileAlignment (i.e. NtHeader->FileAlign).
+         *
+         * I will suppose that the size of the DOS header + its DOS stub is equal
+         * to all the space from the beginning of the image up to the offset where
+         * the old PE header starts, specified by DosHeader->e_lfanew.
+         *
+         * Also I suppose for now that the NumberOfXXX members are valid;
+         * should they not be, it is most probable this HeaderSize check
+         * will fail, and consequently the other checks on the NumberOfXXX
+         * done below fail as well.
+         */
+        TotalHeadersSize = nFileOffset;
+        TotalHeadersSize += sizeof(IMAGE_FILE_HEADER) + FileHeader->SizeOfOptionalHeader +
+                            // OptHeader->NumberOfRvaAndSizes * sizeof(IMAGE_DATA_DIRECTORY) + // It's counted in the size of optional header
+                            FileHeader->NumberOfSections * sizeof(IMAGE_SECTION_HEADER)
+                       /* + FileHeader->NumberOfSymbols * ??? */ ;
+        if (OptHeader->SizeOfHeaders != TotalHeadersSize)
+        {
+            // PrintErrorReason(ErrorInvalidPE, ...);
+            PrintWarning("The reported NT header size %lu does not match the calculated size %lu!\n",
+                         OptHeader->SizeOfHeaders, (ULONG)TotalHeadersSize);
+        }
+
+        /* Verify that the handled number of special data directories is valid */
+        if (OptHeader->NumberOfRvaAndSizes > RTL_NUMBER_OF_FIELD(IMAGE_OPTIONAL_HEADER32, DataDirectory))
+        {
+            PrintErrorReason(ErrorInvalidPE, "Invalid number of special data directories %lu; expected <= %lu",
+                             OptHeader->NumberOfRvaAndSizes, (ULONG)RTL_NUMBER_OF_FIELD(IMAGE_OPTIONAL_HEADER32, DataDirectory));
+            goto Failure;
+        }
+
+#if 0 // It's counted in the size of optional header
+        if (OptHeader->NumberOfRvaAndSizes)
+        {
+            // DataDirectorySize = RTL_FIELD_SIZE(IMAGE_OPTIONAL_HEADER32, DataDirectory);
+            DataDirectorySize = OptHeader->NumberOfRvaAndSizes * sizeof(IMAGE_DATA_DIRECTORY);
+            NtHeadersSize += DataDirectorySize;
+        }
+#endif
+    }
+
+    if (FileHeader->NumberOfSections)
+    {
+        ObjectsTableSize = FileHeader->NumberOfSections * sizeof(IMAGE_SECTION_HEADER);
+
+        /* Make sure the object table fits into the size */
+        if (nFileOffset + sizeof(IMAGE_FILE_HEADER) + FileHeader->SizeOfOptionalHeader
+            /* + DataDirectorySize */ + ObjectsTableSize >= nFileSize)
+        {
+            PrintErrorReason(ErrorMalformedPE, "Object table beyond image size");
+            goto Failure;
+        }
+
+        /* NOTE: Contrary to the old-PE format, in the COFF format the
+         * object/section table is by construction automatically after
+         * the PE header (it follows the optional header). */
+
+        NtHeadersSize += ObjectsTableSize;
+    }
+
+
+    /*
+     * Perform any necessary re-allocation to accomodate for the Data directory array and objects table.
+     */
+    // if (NtHeadersSize > (size_t)FIELD_OFFSET(IMAGE_HEADER, DataDirectory))
+    if (/* DataDirectorySize + */ ObjectsTableSize > 0)
+    {
+        /* Re-allocate the NT PE header to accomodate for the optional header,
+         * the Data directory array and the object table. */
+        PVOID ptr = realloc(NtHeaders, NtHeadersSize);
+        if (!ptr)
+        {
+            PrintError("Failed to re-allocate %lu bytes\n", (ULONG)NtHeadersSize);
+            goto Failure;
+        }
+        NtHeaders = ptr;
+        FileHeader = &NtHeaders->FileHeader;
+        if (OptHeader)
+            OptHeader = &NtHeaders->OptionalHeader;
+
+#if 0 // It's counted in the size of optional header
+        if (DataDirectorySize)
+        {
+            /* Load it */
+            fseek(pImageFile, NtHeaderOffset + FIELD_OFFSET(IMAGE_HEADER, DataDirectory), SEEK_SET);
+            // if (!fread(&NtHeader->DataDirectory, DataDirectorySize, 1, pImageFile))
+            if (!fread(&NtHeader->DataDirectory, sizeof(IMAGE_SPECIAL_DIRECTORY),
+                       NtHeader->NumberOfSpecialRVAs, pImageFile))
+            {
+                PrintError("Failed to read %lu bytes from source file\n", (ULONG)DataDirectorySize);
+                goto Failure;
+            }
+        }
+#endif
+
+        if (ObjectsTableSize)
+        {
+            /* Get a pointer to the object table */
+            // ObjTable = RVA(NtHeader, FIELD_OFFSET(IMAGE_HEADER, DataDirectory) + DataDirectorySize);
+            ObjTable = RVA(FileHeader + 1, FileHeader->SizeOfOptionalHeader);
+
+            /* Load it */
+            fseek(pImageFile,
+                  nFileOffset + sizeof(IMAGE_FILE_HEADER) + FileHeader->SizeOfOptionalHeader
+                  /* + DataDirectorySize */,
+                  SEEK_SET);
+            // if (!fread(ObjTable, ObjectsTableSize, 1, pImageFile))
+            if (!fread(ObjTable, sizeof(IMAGE_SECTION_HEADER), FileHeader->NumberOfSections, pImageFile))
+            {
+                PrintError("Failed to read %lu bytes from source file\n", (ULONG)ObjectsTableSize);
+                goto Failure;
+            }
+        }
+        else
+        {
+            /* No object table is present */
+            FileHeader->NumberOfSections = 0;
+        }
+    }
+
+    /* Return the headers to the caller */
+    *pNtHeaders = NtHeaders;
+    *pNtHeadersSize = (ULONG)NtHeadersSize;
+
+    return TRUE;
+
+Failure:
+    if (NtHeaders)
+        free(NtHeaders);
+    return FALSE;
+}
+
+
 
 /**
  * @brief   Parses an old-style PE image and retrieves its DOS and old-style
@@ -373,17 +898,19 @@ ParseOldPEImage(
     size_t DataDirectorySize = 0;
     size_t ObjectsTableSize = 0;
 
+    /* Make sure the image header fits into the size */
+    if (nFileSize < sizeof(DOS_IMAGE_HEADER))
+    {
+        PrintErrorReason(ErrorInvalidPE, "File smaller than DOS_IMAGE_HEADER size");
+        return FALSE;
+    }
+
     /* Allocate memory for the DOS image header and load it */
     DosHeader = malloc(sizeof(DOS_IMAGE_HEADER));
     if (!DosHeader)
     {
         PrintError("Failed to allocate %lu bytes\n", (ULONG)sizeof(DOS_IMAGE_HEADER));
         return FALSE;
-    }
-    if (nFileSize < sizeof(DOS_IMAGE_HEADER))
-    {
-        PrintErrorReason(ErrorInvalidPE, "File smaller than DOS_IMAGE_HEADER size");
-        goto Failure;
     }
     rewind(pImageFile);
     if (!fread(DosHeader, sizeof(DOS_IMAGE_HEADER), 1, pImageFile))
@@ -653,7 +1180,7 @@ static BOOLEAN
 ParseNewPEImage(
     // IN PVOID pData,
     IN FILE* pImageFile,
-    IN ULONG nFileSize,
+    IN size_t nFileSize,
     /**/ OUT PIMAGE_DOS_HEADER* pDosHeader,/**/
     OUT PIMAGE_HEADER* pNtHeader // OUT PIMAGE_NT_HEADERS32* pNtHeaders
     )
@@ -663,17 +1190,18 @@ ParseNewPEImage(
     ULONG NtHeaderOffset;
     ULONG TotalHeadersSize = 0;
 
+    if (nFileSize < sizeof(DOS_IMAGE_HEADER))
+    {
+        PrintErrorReason(ErrorInvalidPE, "File smaller than DOS_IMAGE_HEADER size");
+        return FALSE;
+    }
+
     /* Allocate memory for the DOS image header and load it */
     DosHeader = malloc(sizeof(DOS_IMAGE_HEADER));
     if (!DosHeader)
     {
         PrintError("Failed to allocate %lu bytes\n", sizeof(DOS_IMAGE_HEADER));
         return FALSE;
-    }
-    if (nFileSize < sizeof(DOS_IMAGE_HEADER))
-    {
-        PrintErrorReason(ErrorInvalidPE, "File smaller than DOS_IMAGE_HEADER size");
-        goto Failure;
     }
     rewind(pImageFile);
     if (!fread(DosHeader, sizeof(DOS_IMAGE_HEADER), 1, pImageFile))
@@ -759,40 +1287,16 @@ ParseNewPEImage(
         goto Failure;
     }
 
-#if 0
-    /* Ensure this is an executable image */
-    if ((NtHeader->FileHeader.Characteristics & IMAGE_FILE_EXECUTABLE_IMAGE) == 0)
-    {
-        PrintErrorReason(ErrorInvalidPE, "Invalid executable image!");
-        goto Failure
-    }
-#endif
 
-#if 0
-    /* Get the COFF header */
-    * pFileHeader = &(*pNtHeader)->FileHeader;
-
-    /* Check for the presence of the optional header */
-    if ((*pFileHeader)->SizeOfOptionalHeader == 0)
-    {
-        PrintError("Unsupported PE image (no optional header)!\n");
-        return FALSE;
-    }
-
-    /* Make sure the optional file header fits into the size */
-    TotalHeadersSize += (*pFileHeader)->SizeOfOptionalHeader;
-    if (TotalHeadersSize >= nFileSize)
-    {
-        PrintError("NT optional header beyond image size!\n");
-        return FALSE;
-    }
-#endif
+    //
+    // TODO: COFF parsing
+    //
 
     // /* Retrieve the optional header and be sure that its size corresponds to its signature */
     // OptHeader.pHdr = (PVOID)(*pFileHeader + 1);
 
     /* Return the headers to the caller */
-    * pDosHeader = DosHeader;
+    *pDosHeader = DosHeader;
     *pNtHeader = NtHeader;
 
     return TRUE;
@@ -1945,8 +2449,18 @@ int main(int argc, char** argv)
     FILE* pDestFile = NULL;
     size_t nFileSize;
     // PVOID pData;
-    PDOS_IMAGE_HEADER pDosHeader = NULL;
-    PIMAGE_HEADER pNtHeader = NULL;
+    struct
+    {
+        /* Heap-allocated */
+        PDOS_IMAGE_HEADER pDosHeader;
+        union
+        {
+            /* Any of these are heap-allocated; it is
+             * therefore sufficient to just free one. */
+            PIMAGE_HEADER pNtHeader;
+            PIMAGE_NT_HEADERS32 pNtHeaders;
+        } u;
+    } Headers = { {NULL} };
     ULONG NtHeaderSize;
     USHORT DosHdrMagic;
 
@@ -2096,21 +2610,25 @@ int main(int argc, char** argv)
     {
         /* This is a PE image, parse it */
         if (!ParseOldPEImage(/*pData*/ pSourceFile, nFileSize,
-                             &pDosHeader, &pNtHeader, &NtHeaderSize))
+                             &Headers.pDosHeader, &Headers.u.pNtHeader,
+                             &NtHeaderSize))
         {
             PrintError("ParseOldPEImage() failed.\n");
             nErrorCode = -6;
             goto Quit;
         }
     }
-#if 0
     else if (nFileSize >= sizeof(IMAGE_FILE_HEADER) /* == IMAGE_SIZEOF_FILE_HEADER */)
     {
-        /* Get the COFF header */
-        pNtHeader = NULL;
-        pFileHeader = (PIMAGE_FILE_HEADER)pData;
+        /* This is a COFF image, parse it */
+        if (!ParseCOFF32Image(/*pData*/ pSourceFile, nFileSize,
+                              0, &Headers.u.pNtHeaders, &NtHeaderSize))
+        {
+            PrintError("ParseCOFF32Image() failed.\n");
+            nErrorCode = -6;
+            goto Quit;
+        }
     }
-#endif
     else
     {
         PrintError("Unrecognized format!\n");
@@ -2120,7 +2638,12 @@ int main(int argc, char** argv)
 
     /* We are good, now display the information if necessary */
     if (bDisplayInfo)
-        DumpOldPEImage(pDosHeader, pNtHeader);
+    {
+        if (Headers.pDosHeader)
+            DumpOldPEImage(Headers.pDosHeader, Headers.u.pNtHeader);
+        else
+            DumpCOFFImage(&Headers.u.pNtHeaders->FileHeader);
+    }
 
     /* If we are not in test mode and no destination file is provided, stop here */
     if (!(bTest || pszDestFile))
@@ -2140,23 +2663,30 @@ int main(int argc, char** argv)
         }
     }
 
-    /* PE image - Either extract only the section specified by the user, or all of them */
-    if (!ProcessPEImage(/*pData*/ pSourceFile, nFileSize, pDestFile,
-                        pDosHeader, pNtHeader, NtHeaderSize))
+    if (Headers.pDosHeader)
     {
-        PrintError("ProcessPEImage() failed.\n");
-        nErrorCode = -8;
-        // goto Quit;
+        /* PE image - Either extract only the section specified by the user, or all of them */
+        if (!ProcessPEImage(/*pData*/ pSourceFile, nFileSize, pDestFile,
+                            Headers.pDosHeader, Headers.u.pNtHeader, NtHeaderSize))
+        {
+            PrintError("ProcessPEImage() failed.\n");
+            nErrorCode = -8;
+            // goto Quit;
+        }
+    }
+    else
+    {
+        PrintError("Conversion of pure-COFF images is currently unimplemented.\n");
     }
 
     if (pDestFile)
         fclose(pDestFile);
 
 Quit:
-    if (pNtHeader)
-        free(pNtHeader);
-    if (pDosHeader)
-        free(pDosHeader);
+    if (Headers.u.pNtHeader)
+        free(Headers.u.pNtHeader);
+    if (Headers.pDosHeader)
+        free(Headers.pDosHeader);
 
     fclose(pSourceFile);
     // free(pData);
