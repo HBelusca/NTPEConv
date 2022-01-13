@@ -239,13 +239,16 @@ DumpCOFFDataDirectory(
 
         /* New-PE Directories only */
         "IMAGE_DIRECTORY_ENTRY_COPYRIGHT", // (x86-specific), otherwise: "IMAGE_DIRECTORY_ENTRY_ARCHITECTURE"
-        "IMAGE_DIRECTORY_ENTRY_GLOBALPTR"
+        "IMAGE_DIRECTORY_ENTRY_GLOBALPTR",
         "IMAGE_DIRECTORY_ENTRY_TLS",
         "IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG",
         "IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT",
         "IMAGE_DIRECTORY_ENTRY_IAT",
         "IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT",
         "IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR",
+
+        /* Not defined */
+        "n/a",
     };
 
     ULONG MaxNumberOfDirectories;
