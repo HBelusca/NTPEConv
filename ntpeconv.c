@@ -248,7 +248,7 @@ DumpCOFFDataDirectory(
         "IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR",
 
         /* Not defined */
-        "n/a",
+        "\"n/a\"",
     };
 
     ULONG MaxNumberOfDirectories;
@@ -604,7 +604,7 @@ static BOOLEAN
 ParseCOFF32Image(
     IN FILE* pImageFile,
     IN size_t nFileSize,
-    IN long nFileOffset OPTIONAL,
+    IN ULONG nFileOffset OPTIONAL,
     OUT PIMAGE_NT_HEADERS32* pNtHeaders,
     OUT PULONG pNtHeadersSize)
 {
@@ -613,23 +613,22 @@ ParseCOFF32Image(
     PIMAGE_OPTIONAL_HEADER32 OptHeader = NULL;
     PIMAGE_SECTION_HEADER ObjTable = NULL; // SectionTable
     size_t NtHeadersSize;
-    size_t TotalHeadersSize = 0;
+    size_t TotalHeadersSize;
     size_t DataDirectorySize = 0;
     size_t ObjectsTableSize = 0;
 
     /* Make sure the image header fits into the size */
-    if (nFileSize < nFileOffset + sizeof(IMAGE_FILE_HEADER))
+    if (nFileOffset + sizeof(IMAGE_FILE_HEADER) > nFileSize)
     {
         PrintErrorReason(ErrorInvalidPE, "File smaller than IMAGE_FILE_HEADER size");
         // PrintErrorReason(ErrorMalformedPE, "COFF file header beyond image size");
         return FALSE;
     }
 
-    NtHeadersSize = RTL_SIZEOF_THROUGH_FIELD(IMAGE_NT_HEADERS32, FileHeader);
-
     /* Allocate memory for the image file header (+ the extra signature field)
      * and load it. It will be re-allocated later to accomodate for the extra
      * optional header (and its directory array) and the object/sections table. */
+    NtHeadersSize = RTL_SIZEOF_THROUGH_FIELD(IMAGE_NT_HEADERS32, FileHeader);
     NtHeaders = malloc(NtHeadersSize);
     if (!NtHeaders)
     {
@@ -653,7 +652,7 @@ ParseCOFF32Image(
     }
 
     /* Stamp the signature with 'COFF', to distinguish with new PE files */
-    NtHeaders->Signature = 'FFOC'; // 'COFF';
+    NtHeaders->Signature = 'FFOC';
 
 
     /* Symbols are not currently supported */
@@ -748,7 +747,7 @@ ParseCOFF32Image(
                             // OptHeader->NumberOfRvaAndSizes * sizeof(IMAGE_DATA_DIRECTORY) + // It's counted in the size of optional header
                             FileHeader->NumberOfSections * sizeof(IMAGE_SECTION_HEADER)
                        /* + FileHeader->NumberOfSymbols * ??? */ ;
-        TotalHeadersSize = ROUND_UP(TotalHeadersSize, OptHeader->FileAlignment);
+        TotalHeadersSize = ROUND_UP(TotalHeadersSize, (size_t)OptHeader->FileAlignment);
         if (OptHeader->SizeOfHeaders != TotalHeadersSize)
         {
             // PrintErrorReason(ErrorInvalidPE, ...);
@@ -883,88 +882,31 @@ static BOOLEAN
 ParseOldPEImage(
     IN FILE* pImageFile,
     IN size_t nFileSize,
-    OUT PDOS_IMAGE_HEADER* pDosHeader,
+    IN ULONG nFileOffset,
+    IN PDOS_IMAGE_HEADER DosHeader,
     OUT PIMAGE_HEADER* pNtHeader,
     OUT PULONG pNtHeaderSize)
 {
-    PDOS_IMAGE_HEADER DosHeader = NULL;
     PIMAGE_HEADER NtHeader = NULL;
     PIMAGE_OBJECT_HEADER ObjTable = NULL;
-    ULONG NtHeaderOffset;
     size_t NtHeaderSize;
-    size_t TotalHeadersSize = 0;
+    size_t TotalHeadersSize;
     size_t DataDirectorySize = 0;
     size_t ObjectsTableSize = 0;
-
-    /* Make sure the DOS header fits into the size */
-    if (nFileSize < sizeof(DOS_IMAGE_HEADER))
-    {
-        PrintErrorReason(ErrorInvalidPE, "File smaller than DOS_IMAGE_HEADER size");
-        return FALSE;
-    }
-
-    /* Allocate memory for the DOS image header and load it */
-    DosHeader = malloc(sizeof(DOS_IMAGE_HEADER));
-    if (!DosHeader)
-    {
-        PrintError("Failed to allocate %lu bytes\n", (ULONG)sizeof(DOS_IMAGE_HEADER));
-        return FALSE;
-    }
-    rewind(pImageFile);
-    if (!fread(DosHeader, sizeof(DOS_IMAGE_HEADER), 1, pImageFile))
-    {
-        PrintError("Failed to read %lu bytes from source file\n", (ULONG)sizeof(DOS_IMAGE_HEADER));
-        goto Failure;
-    }
-
-    /* Ensure it's a PE image */
-    if (DosHeader->e_magic != IMAGE_DOS_SIGNATURE)
-    {
-        PrintErrorReason(ErrorInvalidPE, "Invalid signature 0x%04X '%c%c'",
-                         DosHeader->e_magic,
-                         PRINT_VAR_CHAR(DosHeader->e_magic, 0), PRINT_VAR_CHAR(DosHeader->e_magic, 1));
-        goto Failure;
-    }
-
-    /* Get the offset to the NT header */
-    NtHeaderOffset = DosHeader->e_lfanew;
-
-    /*
-     * IMPORTANT NOTE!! We only support **VALID** PE files, and NOT
-     * broken ones where e.g. the PE header is "merged" within the
-     * DOS header, or where the list of objects/sections and directives
-     * are not present after the PE header.
-     */
-
-     /* It should be aligned on a 8-byte boundary */
-    // if (ROUND_UP(NtHeaderOffset, sizeof(ULONG64)) != NtHeaderOffset)
-    if (!IS_ALIGNED(NtHeaderOffset, sizeof(ULONG64)))
-    {
-        PrintErrorReason(ErrorMalformedPE, "PE header offset not 8-byte aligned");
-        goto Failure;
-    }
-
-    /* NOT BROKEN: The NT header must be **after** the DOS header */
-    if (NtHeaderOffset < sizeof(DOS_IMAGE_HEADER))
-    {
-        PrintErrorReason(ErrorMalformedPE, "PE header offset in DOS header");
-        goto Failure;
-    }
 
     NtHeaderSize = FIELD_OFFSET(IMAGE_HEADER, DataDirectory);
 
     /* Make sure the old NT PE header fits into the size */
-    TotalHeadersSize += NtHeaderOffset + NtHeaderSize;
-    if (TotalHeadersSize >= nFileSize)
+    if (nFileOffset + NtHeaderSize >= nFileSize)
     {
         PrintErrorReason(ErrorMalformedPE, "NT headers beyond image size");
-        goto Failure;
+        return FALSE;
     }
 #if 0
-    if (nFileSize < NtHeaderOffset + NtHeaderSize)
+    if (nFileOffset + NtHeaderSize > nFileSize)
     {
         PrintErrorReason(ErrorInvalidPE, "File smaller than IMAGE_HEADER size");
-        goto Failure;
+        return FALSE;
     }
 #endif
 
@@ -975,49 +917,17 @@ ParseOldPEImage(
     if (!NtHeader)
     {
         PrintError("Failed to allocate %lu bytes\n", (ULONG)NtHeaderSize);
-        goto Failure;
+        return FALSE;
     }
-    fseek(pImageFile, NtHeaderOffset, SEEK_SET);
+    fseek(pImageFile, nFileOffset, SEEK_SET);
     if (!fread(NtHeader, NtHeaderSize, 1, pImageFile))
     {
         PrintError("Failed to read %lu bytes from source file\n", (ULONG)NtHeaderSize);
         goto Failure;
     }
 
-    /* Verify the PE Signature */
-    if (NtHeader->SignatureBytes != IMAGE_NT_SIGNATURE)
-    {
-        PrintErrorReason(ErrorInvalidPE, "Invalid NT image signature 0x%08X '%c%c%c%c'",
-                         NtHeader->SignatureBytes,
-                         PRINT_VAR_CHAR(NtHeader->SignatureBytes, 0), PRINT_VAR_CHAR(NtHeader->SignatureBytes, 1),
-                         PRINT_VAR_CHAR(NtHeader->SignatureBytes, 2), PRINT_VAR_CHAR(NtHeader->SignatureBytes, 3));
-        goto Failure;
-    }
-
-#if 0
-    /* Ensure this is an executable image */
-    if ((NtHeader->FileHeader.Characteristics & IMAGE_FILE_EXECUTABLE_IMAGE) == 0)
-    {
-        PrintErrorReason(ErrorInvalidPE, "Invalid executable image!");
-        goto Failure;
-    }
-#endif
-
-    /* Verify that we are not actually looking at a new PE image */
-    if (NtHeaderSize >= RTL_SIZEOF_THROUGH_FIELD(IMAGE_NT_HEADERS32, OptionalHeader.Magic))
-    {
-        /* Overlay a new PE header structure and check some fields */
-        PIMAGE_NT_HEADERS32 NewPEHeader = (PIMAGE_NT_HEADERS32)NtHeader;
-        C_ASSERT(FIELD_OFFSET(IMAGE_NT_HEADERS32, Signature) == FIELD_OFFSET(IMAGE_HEADER, SignatureBytes));
-
-        if ( (NewPEHeader->FileHeader.SizeOfOptionalHeader >= FIELD_OFFSET(IMAGE_OPTIONAL_HEADER32, DataDirectory)) &&
-             ((NewPEHeader->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) ||
-              (NewPEHeader->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)) )
-        {
-            PrintError("This is already a new PE image!\n");
-            goto Failure;
-        }
-    }
+    /* Verify the PE Signature (Note: this has been verified before) */
+    ASSERT(NtHeader->SignatureBytes == IMAGE_NT_SIGNATURE);
 
     /*
      * The total size of headers reported is equal to the combined size of:
@@ -1034,7 +944,7 @@ ParseOldPEImage(
      * will fail, and consequently the other checks on the NumberOfXXX
      * done below fail as well.
      */
-    TotalHeadersSize = NtHeaderOffset /* DosHeader->e_lfanew */;
+    TotalHeadersSize = nFileOffset;
     TotalHeadersSize += FIELD_OFFSET(IMAGE_HEADER, DataDirectory) +
                         NtHeader->NumberOfSpecialRVAs * sizeof(IMAGE_SPECIAL_DIRECTORY) +
                         NtHeader->NumberOfObjects * sizeof(IMAGE_OBJECT_HEADER);
@@ -1099,7 +1009,7 @@ ParseOldPEImage(
         }
 
         /* NOT BROKEN: The object table must be **after** the PE header */
-        if (NtHeader->ObjectTableRVA < NtHeaderOffset + NtHeaderSize)
+        if (NtHeader->ObjectTableRVA < nFileOffset + NtHeaderSize)
         {
             PrintErrorReason(ErrorMalformedPE, "Object table not following the PE header");
             goto Failure;
@@ -1125,7 +1035,7 @@ ParseOldPEImage(
         if (DataDirectorySize)
         {
             /* Load it */
-            fseek(pImageFile, NtHeaderOffset + FIELD_OFFSET(IMAGE_HEADER, DataDirectory), SEEK_SET);
+            fseek(pImageFile, nFileOffset + FIELD_OFFSET(IMAGE_HEADER, DataDirectory), SEEK_SET);
             // if (!fread(&NtHeader->DataDirectory, DataDirectorySize, 1, pImageFile))
             if (!fread(&NtHeader->DataDirectory, sizeof(IMAGE_SPECIAL_DIRECTORY),
                        NtHeader->NumberOfSpecialRVAs, pImageFile))
@@ -1161,7 +1071,6 @@ ParseOldPEImage(
     }
 
     /* Return the headers to the caller */
-    *pDosHeader = DosHeader;
     *pNtHeader  = NtHeader;
     *pNtHeaderSize = (ULONG)NtHeaderSize;
 
@@ -1170,8 +1079,6 @@ ParseOldPEImage(
 Failure:
     if (NtHeader)
         free(NtHeader);
-    if (DosHeader)
-        free(DosHeader);
     return FALSE;
 }
 
@@ -1185,113 +1092,43 @@ static BOOLEAN
 ParseNewPEImage(
     IN FILE* pImageFile,
     IN size_t nFileSize,
-    OUT PIMAGE_DOS_HEADER* pDosHeader,
+    IN ULONG nFileOffset,
+    IN PIMAGE_DOS_HEADER DosHeader,
     OUT PIMAGE_NT_HEADERS32* pNtHeaders,
     OUT PULONG pNtHeadersSize)
 {
-    PIMAGE_DOS_HEADER DosHeader = NULL;
     PIMAGE_NT_HEADERS32 NtHeaders = NULL;
     ULONG NtHeadersSize;
-    ULONG PEHdrSignature;
-    ULONG NtHeaderOffset;
-    ULONG TotalHeadersSize = 0;
-
-    /* Make sure the DOS header fits into the size */
-    if (nFileSize < sizeof(IMAGE_DOS_HEADER))
-    {
-        PrintErrorReason(ErrorInvalidPE, "File smaller than IMAGE_DOS_HEADER size");
-        return FALSE;
-    }
-
-    /* Allocate memory for the DOS image header and load it */
-    DosHeader = malloc(sizeof(IMAGE_DOS_HEADER));
-    if (!DosHeader)
-    {
-        PrintError("Failed to allocate %lu bytes\n", (ULONG)sizeof(IMAGE_DOS_HEADER));
-        return FALSE;
-    }
-    rewind(pImageFile);
-    if (!fread(DosHeader, sizeof(IMAGE_DOS_HEADER), 1, pImageFile))
-    {
-        PrintError("Failed to read %lu bytes from source file\n", (ULONG)sizeof(IMAGE_DOS_HEADER));
-        goto Failure;
-    }
-
-    /* Ensure it's a PE image */
-    if (DosHeader->e_magic != IMAGE_DOS_SIGNATURE)
-    {
-        PrintErrorReason(ErrorInvalidPE, "Invalid signature 0x%04X '%c%c'",
-                         DosHeader->e_magic,
-                         PRINT_VAR_CHAR(DosHeader->e_magic, 0), PRINT_VAR_CHAR(DosHeader->e_magic, 1));
-        goto Failure;
-    }
-
-    /* Get the offset to the NT header */
-    NtHeaderOffset = DosHeader->e_lfanew;
-
-    /*
-     * IMPORTANT NOTE!! We only support **VALID** PE files, and NOT
-     * broken ones where e.g. the PE header is "merged" within the
-     * DOS header, or where the list of objects/sections and directives
-     * are not present after the PE header.
-     */
-
-     /* It should be aligned on a 8-byte boundary */
-    // if (ROUND_UP(NtHeaderOffset, sizeof(ULONG64)) != NtHeaderOffset)
-    if (!IS_ALIGNED(NtHeaderOffset, sizeof(ULONG64)))
-    {
-        PrintErrorReason(ErrorMalformedPE, "PE header offset not 8-byte aligned");
-        goto Failure;
-    }
-
-    /* NOT BROKEN: The NT header must be **after** the DOS header */
-    if (NtHeaderOffset < sizeof(IMAGE_DOS_HEADER))
-    {
-        PrintErrorReason(ErrorMalformedPE, "PE header offset in DOS header");
-        goto Failure;
-    }
-
+    // ULONG PEHdrSignature;
 
     /* Make sure the NT PE header fits into the size */
-    TotalHeadersSize += NtHeaderOffset + RTL_SIZEOF_THROUGH_FIELD(IMAGE_NT_HEADERS32, FileHeader);
-    if (TotalHeadersSize >= nFileSize)
+    if (nFileOffset + RTL_SIZEOF_THROUGH_FIELD(IMAGE_NT_HEADERS32, FileHeader) >= nFileSize)
     {
         PrintErrorReason(ErrorMalformedPE, "NT headers beyond image size");
-        goto Failure;
-    }
-
-    /* Read the header signature */
-    fseek(pImageFile, NtHeaderOffset, SEEK_SET);
-    if (!fread(&PEHdrSignature, sizeof(PEHdrSignature), 1, pImageFile))
-    {
-        PrintError("Failed to read %lu bytes from source file\n", (ULONG)sizeof(PEHdrSignature));
-        goto Failure;
-    }
-
-    /* Verify the PE Signature */
-    if (PEHdrSignature != IMAGE_NT_SIGNATURE)
-    {
-        PrintErrorReason(ErrorInvalidPE, "Invalid NT image signature 0x%08X '%c%c%c%c'",
-                         PEHdrSignature,
-                         PRINT_VAR_CHAR(PEHdrSignature, 0), PRINT_VAR_CHAR(PEHdrSignature, 1),
-                         PRINT_VAR_CHAR(PEHdrSignature, 2), PRINT_VAR_CHAR(PEHdrSignature, 3));
-        goto Failure;
+        return FALSE;
     }
 
     /* Actually load the NT PE headers, in COFF format */
     if (!ParseCOFF32Image(pImageFile, nFileSize,
-                          // NtHeaderOffset + RTL_SIZEOF_THROUGH_FIELD(IMAGE_NT_HEADERS32, Signature),
-                          NtHeaderOffset + FIELD_OFFSET(IMAGE_NT_HEADERS32, FileHeader),
+                          // nFileOffset + RTL_SIZEOF_THROUGH_FIELD(IMAGE_NT_HEADERS32, Signature),
+                          nFileOffset + FIELD_OFFSET(IMAGE_NT_HEADERS32, FileHeader),
                           &NtHeaders, &NtHeadersSize))
     {
+        PrintError("ParseCOFF32Image() failed.\n");
+        return FALSE;
+    }
+
+    /* Check for the presence of the optional header */
+    if (NtHeaders->FileHeader.SizeOfOptionalHeader == 0)
+    {
+        PrintErrorReason(ErrorUnsupportedPE, "Unsupported PE image (no optional header)!");
         goto Failure;
     }
 
     /* Restore the original PE signature */
-    NtHeaders->Signature = PEHdrSignature;
+    NtHeaders->Signature = IMAGE_NT_SIGNATURE; // PEHdrSignature;
 
     /* Return the headers to the caller */
-    *pDosHeader = DosHeader;
     *pNtHeaders = NtHeaders;
     *pNtHeadersSize = (ULONG)NtHeadersSize;
 
@@ -1300,9 +1137,262 @@ ParseNewPEImage(
 Failure:
     if (NtHeaders)
         free(NtHeaders);
-    if (DosHeader)
-        free(DosHeader);
     return FALSE;
+}
+
+
+typedef struct _IMAGE_PARSE_DATA
+{
+    enum
+    {
+        IMAGE_Unknown = 0,
+        IMAGE_Coff32,
+        IMAGE_OldPE,
+        IMAGE_NewPE
+    } ImageType;
+
+    /* Heap-allocated */
+    PIMAGE_DOS_HEADER DosHeader;
+
+    union
+    {
+        /* Any of these are heap-allocated; it is
+         * therefore sufficient to just free one. */
+        PIMAGE_HEADER NtHeader;
+        PIMAGE_NT_HEADERS32 NtHeaders32;
+    } u;
+    ULONG NtHeadersSize;
+} IMAGE_PARSE_DATA, *PIMAGE_PARSE_DATA;
+
+
+static BOOLEAN
+DetermineImageType(
+    IN FILE* pImageFile,
+    IN size_t nFileSize,
+    IN OUT PIMAGE_PARSE_DATA ImageData)
+{
+    USHORT DosHdrMagic;
+
+    RtlZeroMemory(ImageData, sizeof(*ImageData));
+    ImageData->ImageType = IMAGE_Unknown;
+
+    /* The file size must be greater than the minimum of
+     * the IMAGE_DOS_HEADER and IMAGE_FILE_HEADER sizes. */
+    if (min(sizeof(IMAGE_DOS_HEADER), sizeof(IMAGE_FILE_HEADER)) > nFileSize)
+    {
+        PrintErrorReason(ErrorInvalidPE, "File smaller than DOS or COFF header size");
+        return FALSE;
+    }
+
+    /* Read the header signature, if any */
+    rewind(pImageFile);
+    if (!fread(&DosHdrMagic, sizeof(DosHdrMagic), 1, pImageFile))
+    {
+        PrintError("Failed to read %lu bytes from source file\n", (ULONG)sizeof(DosHdrMagic));
+        return FALSE;
+    }
+
+    /* Check whether this is an MZ/PE image or a pure COFF file */
+    // pDosHeader = (IMAGE_DOS_HEADER)pData;
+    if ((DosHdrMagic == IMAGE_DOS_SIGNATURE) && (nFileSize >= sizeof(IMAGE_DOS_HEADER)))
+    {
+        /*
+         * The image must be MZ/PE
+         */
+
+        /* New-PE header structure overlay, part of IMAGE_NT_HEADERS32 */
+#include <pshpack4.h>
+        typedef struct _IMAGE_OVERLAY
+        {
+            ULONG Signature;
+            IMAGE_FILE_HEADER FileHeader;
+            USHORT OptionalHeader_Magic;
+            USHORT Padding;
+        } IMAGE_OVERLAY;
+/* Size of the useful portion of IMAGE_OVERLAY without the padding */
+#define SIZEOF_IMAGE_OVERLAY    RTL_SIZEOF_THROUGH_FIELD(IMAGE_OVERLAY, OptionalHeader_Magic)
+#include <poppack.h>
+        C_ASSERT(SIZEOF_IMAGE_OVERLAY == RTL_SIZEOF_THROUGH_FIELD(IMAGE_NT_HEADERS32, OptionalHeader.Magic));
+        C_ASSERT(FIELD_OFFSET(IMAGE_OVERLAY, Signature) == FIELD_OFFSET(IMAGE_NT_HEADERS32, Signature));
+        C_ASSERT(FIELD_OFFSET(IMAGE_HEADER, SignatureBytes) == FIELD_OFFSET(IMAGE_NT_HEADERS32, Signature));
+        C_ASSERT(FIELD_OFFSET(IMAGE_HEADER, DataDirectory) > RTL_SIZEOF_THROUGH_FIELD(IMAGE_NT_HEADERS32, OptionalHeader.Magic));
+
+        PIMAGE_DOS_HEADER DosHeader;
+        IMAGE_OVERLAY PETestBuffer = { 0 };
+        ULONG NtHeaderOffset;
+
+#if 0
+        /* Make sure the DOS header fits into the size */
+        if (sizeof(IMAGE_DOS_HEADER) > nFileSize)
+        {
+            PrintErrorReason(ErrorInvalidPE, "File smaller than IMAGE_DOS_HEADER size");
+            return FALSE;
+        }
+#endif
+
+        /* Allocate memory for the DOS image header and load it */
+        DosHeader = malloc(sizeof(IMAGE_DOS_HEADER));
+        if (!DosHeader)
+        {
+            PrintError("Failed to allocate %lu bytes\n", (ULONG)sizeof(IMAGE_DOS_HEADER));
+            return FALSE;
+        }
+        rewind(pImageFile);
+        if (!fread(DosHeader, sizeof(IMAGE_DOS_HEADER), 1, pImageFile))
+        {
+            PrintError("Failed to read %lu bytes from source file\n", (ULONG)sizeof(IMAGE_DOS_HEADER));
+            goto Failure;
+        }
+
+        /* Ensure it's a PE image */
+        if (DosHeader->e_magic != IMAGE_DOS_SIGNATURE)
+        {
+            PrintErrorReason(ErrorInvalidPE, "Invalid signature 0x%04X '%c%c'",
+                             DosHeader->e_magic,
+                             PRINT_VAR_CHAR(DosHeader->e_magic, 0), PRINT_VAR_CHAR(DosHeader->e_magic, 1));
+            goto Failure;
+        }
+
+        //
+        // TODO: Ensure we are quite certainly going to deal with MZ/PE
+        // and not with an exclusively MZ DOS executable. Should check
+        // for some values to be zero, especially in the reserved fields
+        // e_res[] and beyond...
+        //
+        // If it turns out they aren't zero, we may still try to check
+        // what's at e_lfanew, but we should not be convinced this will be
+        // a valid MZ/PE at the end of the day.
+        //
+
+        /* Get the offset to the NT header */
+        NtHeaderOffset = DosHeader->e_lfanew;
+
+        /*
+         * IMPORTANT NOTE!! We only support **VALID** PE files, and NOT
+         * broken ones where e.g. the PE header is "merged" within the
+         * DOS header, or where the list of objects/sections and directives
+         * are not present after the PE header.
+         */
+
+        /* It should be aligned on a 8-byte boundary */
+        // if (ROUND_UP(NtHeaderOffset, sizeof(ULONG64)) != NtHeaderOffset)
+        if (!IS_ALIGNED(NtHeaderOffset, sizeof(ULONG64)))
+        {
+            PrintErrorReason(ErrorMalformedPE, "PE header offset not 8-byte aligned");
+            goto Failure;
+        }
+
+        /* NOT BROKEN: The NT header must be **after** the DOS header */
+        if (NtHeaderOffset < sizeof(IMAGE_DOS_HEADER))
+        {
+            PrintErrorReason(ErrorMalformedPE, "PE header offset in DOS header");
+            goto Failure;
+        }
+
+        //
+        // TODO: Now check for PE
+        //
+
+        /* Read the header signature */
+        fseek(pImageFile, NtHeaderOffset, SEEK_SET);
+        if (!fread(&PETestBuffer.Signature, sizeof(PETestBuffer.Signature), 1, pImageFile))
+        {
+            PrintError("Failed to read %lu bytes from source file\n", (ULONG)sizeof(PETestBuffer.Signature));
+            goto Failure;
+        }
+
+        /* Verify the PE Signature */
+        if (PETestBuffer.Signature != IMAGE_NT_SIGNATURE)
+        {
+            PrintErrorReason(ErrorInvalidPE, "Invalid NT image signature 0x%08X '%c%c%c%c'",
+                             PETestBuffer.Signature,
+                             PRINT_VAR_CHAR(PETestBuffer.Signature, 0), PRINT_VAR_CHAR(PETestBuffer.Signature, 1),
+                             PRINT_VAR_CHAR(PETestBuffer.Signature, 2), PRINT_VAR_CHAR(PETestBuffer.Signature, 3));
+            goto Failure;
+        }
+
+
+        /* Make sure the NT PE header fits into the size */
+        // TotalHeadersSize += NtHeaderOffset + RTL_SIZEOF_THROUGH_FIELD(IMAGE_NT_HEADERS32, FileHeader);
+        // if (TotalHeadersSize >= nFileSize)
+        if (NtHeaderOffset + SIZEOF_IMAGE_OVERLAY >= nFileSize)
+        {
+            PrintErrorReason(ErrorMalformedPE, "NT headers beyond image size");
+            goto Failure;
+        }
+
+        /* Read the whole overlay (including the header signature) */
+        fseek(pImageFile, NtHeaderOffset, SEEK_SET);
+        if (!fread(&PETestBuffer, SIZEOF_IMAGE_OVERLAY, 1, pImageFile))
+        {
+            PrintError("Failed to read %lu bytes from source file\n", (ULONG)SIZEOF_IMAGE_OVERLAY);
+            goto Failure;
+        }
+
+        /* Verify that we are not actually looking at a new-PE image */
+        if ( (PETestBuffer.FileHeader.SizeOfOptionalHeader >= FIELD_OFFSET(IMAGE_OPTIONAL_HEADER32, DataDirectory)) &&
+             ((PETestBuffer.OptionalHeader_Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) ||
+              (PETestBuffer.OptionalHeader_Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)) )
+        {
+            /* This should be a new-PE image */
+            if (!ParseNewPEImage(pImageFile, nFileSize,
+                                 NtHeaderOffset,
+                                 DosHeader,
+                                 &ImageData->u.NtHeaders32,
+                                 &ImageData->NtHeadersSize))
+            {
+                PrintError("ParseNewPEImage() failed.\n");
+                goto Failure;
+            }
+            ImageData->ImageType = IMAGE_NewPE;
+        }
+        else
+        {
+            /* This should be an old-PE image */
+            if (!ParseOldPEImage(pImageFile, nFileSize,
+                                 NtHeaderOffset,
+                                 DosHeader,
+                                 &ImageData->u.NtHeader,
+                                 &ImageData->NtHeadersSize))
+            {
+                PrintError("ParseOldPEImage() failed.\n");
+                goto Failure;
+            }
+            ImageData->ImageType = IMAGE_OldPE;
+        }
+
+        /* Return the headers to the caller */
+        ImageData->DosHeader = DosHeader;
+        return TRUE;
+
+    Failure:
+        if (DosHeader)
+            free(DosHeader);
+        return FALSE;
+    }
+    else if (nFileSize >= sizeof(IMAGE_FILE_HEADER) /* == IMAGE_SIZEOF_FILE_HEADER */)
+    {
+        /*
+         * The image must be COFF
+         */
+        if (!ParseCOFF32Image(pImageFile, nFileSize,
+                              0,
+                              &ImageData->u.NtHeaders32,
+                              &ImageData->NtHeadersSize))
+        {
+            PrintError("ParseCOFF32Image() failed.\n");
+            return FALSE;
+        }
+        ImageData->ImageType = IMAGE_Coff32;
+
+        ImageData->DosHeader = NULL;
+        return TRUE;
+    }
+    else
+    {
+        PrintError("Unrecognized image format!\n");
+        return FALSE;
+    }
 }
 
 
@@ -1472,7 +1562,7 @@ ProcessPEImage(
     SizeOfOptionalHeader = FIELD_OFFSET(IMAGE_OPTIONAL_HEADER32, DataDirectory)
                             + 9 * sizeof(IMAGE_DATA_DIRECTORY); // RTL_FIELD_SIZE(IMAGE_OPTIONAL_HEADER32, DataDirectory);
 
-    TotalHeadersSize = FIELD_OFFSET(IMAGE_NT_HEADERS32, OptionalHeader) + SizeOfOptionalHeader;
+    TotalHeadersSize = FIELD_OFFSET(IMAGE_NT_HEADERS32, OptionalHeader) + (size_t)SizeOfOptionalHeader;
     /* Take the length of the object/section table into account */
     TotalHeadersSize += NtHeader->NumberOfObjects * sizeof(IMAGE_SECTION_HEADER);
 
@@ -1581,7 +1671,7 @@ ProcessPEImage(
      * to all the space from the beginning of the image up to the offset where
      * the old PE header starts, specified by DosHeader->e_lfanew.
      */
-    OptHeader->SizeOfHeaders = ROUND_UP(DosHeader->e_lfanew + TotalHeadersSize, NtHeader->FileAlign);
+    OptHeader->SizeOfHeaders = ROUND_UP((size_t)DosHeader->e_lfanew + TotalHeadersSize, (size_t)NtHeader->FileAlign);
 
     // TODO: If original CheckSum == 0 then keep it, otherwise
     // recalculate it once we have completely done the conversion.
@@ -2186,7 +2276,7 @@ ProcessPEImage(
                                 /* Modify the directory entry */
                                 OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress =
                                  NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].RVA =
-                                    (ULONG)RVA(ObjTable[i].RVA, (ULONG_PTR)DebugDirectory - (ULONG_PTR)TmpSection);
+                                    (ULONG)(ULONG_PTR)RVA(ObjTable[i].RVA, (ULONG_PTR)DebugDirectory - (ULONG_PTR)TmpSection);
 
                                 OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size =
                                  NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size = sizeof(*DebugDirectory);
@@ -2300,7 +2390,7 @@ ProcessPEImage(
                     /* Modify the directory entry */
                     OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress =
                      NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].RVA =
-                        (ULONG)RVA(LastSectionHdr->RVA, (ULONG_PTR)DebugDirectory - (ULONG_PTR)TmpSection);
+                        (ULONG)(ULONG_PTR)RVA(LastSectionHdr->RVA, (ULONG_PTR)DebugDirectory - (ULONG_PTR)TmpSection);
 
                     OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size =
                      NtHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size = sizeof(*DebugDirectory);
@@ -2400,6 +2490,7 @@ Quit:
 }
 
 
+
 static void
 Banner(void)
 {
@@ -2443,21 +2534,8 @@ int main(int argc, char** argv)
     FILE* pDestFile = NULL;
     size_t nFileSize;
     // PVOID pData;
-    struct
-    {
-        /* Heap-allocated */
-        PDOS_IMAGE_HEADER pDosHeader;
-        union
-        {
-            /* Any of these are heap-allocated; it is
-             * therefore sufficient to just free one. */
-            PIMAGE_HEADER pNtHeader;
-            PIMAGE_NT_HEADERS32 pNtHeaders;
-        } u;
-    } Headers = { {NULL} };
-    bool bOldPE;
-    ULONG NtHeaderSize;
-    USHORT DosHdrMagic;
+
+    IMAGE_PARSE_DATA Headers = { IMAGE_Unknown, NULL, {NULL}, 0 };
 
     /* Enable correct console locale.
      * NOTE: See https://stackoverflow.com/a/44225070/13530036 */
@@ -2578,21 +2656,10 @@ int main(int argc, char** argv)
         nErrorCode = -3;
         goto Quit;
     }
-#endif
 
-#if 0
     /* Read the whole source file */
-    if (!fread(pData, nFileSize, 1, pSourceFile))
-#else
-    /* Read the header signature */
-    if ((nFileSize < sizeof(DOS_IMAGE_HEADER)) ||
-        !fread(&DosHdrMagic, sizeof(DosHdrMagic), 1, pSourceFile))
+    fread(pData, nFileSize, 1, pSourceFile);
 #endif
-    {
-        PrintError("Failed to read %lu bytes from source file\n", (ULONG)/* nFileSize */sizeof(DOS_IMAGE_HEADER));
-        nErrorCode = -4;
-        goto Quit;
-    }
 
     if (bDisplayInfo)
         printf("Image file: %s\n\n", pszSourceFile);
@@ -2600,65 +2667,35 @@ int main(int argc, char** argv)
     fflush(stderr);
 
     /* Check whether this is a pure COFF file or a PE image */
-    // pDosHeader = (PDOS_IMAGE_HEADER)pData;
-    if ((nFileSize >= sizeof(DOS_IMAGE_HEADER)) && (DosHdrMagic == IMAGE_DOS_SIGNATURE))
-    {
-        /* This is a PE image, parse it */
-        if (!ParseOldPEImage(/*pData*/ pSourceFile, nFileSize,
-                             &Headers.pDosHeader, &Headers.u.pNtHeader,
-                             &NtHeaderSize))
-        {
-            PrintError("ParseOldPEImage() failed.\n");
-            bOldPE = FALSE;
-
-            /* Retry with new PE */
-            if (!ParseNewPEImage(/*pData*/ pSourceFile, nFileSize,
-                                 &Headers.pDosHeader, &Headers.u.pNtHeaders,
-                                 &NtHeaderSize))
-            {
-                PrintError("ParseNewPEImage() failed.\n");
-                nErrorCode = -6;
-                goto Quit;
-            }
-        }
-        else
-        {
-            bOldPE = TRUE;
-        }
-    }
-    else if (nFileSize >= sizeof(IMAGE_FILE_HEADER) /* == IMAGE_SIZEOF_FILE_HEADER */)
-    {
-        bOldPE = FALSE;
-
-        /* This is a COFF image, parse it */
-        if (!ParseCOFF32Image(/*pData*/ pSourceFile, nFileSize,
-                              0, &Headers.u.pNtHeaders, &NtHeaderSize))
-        {
-            PrintError("ParseCOFF32Image() failed.\n");
-            nErrorCode = -6;
-            goto Quit;
-        }
-    }
-    else
+    if (!DetermineImageType(/*pData*/ pSourceFile, nFileSize, &Headers))
     {
         PrintError("Unrecognized image format!\n");
-        nErrorCode = -6;
+        nErrorCode = -4;
         goto Quit;
     }
 
     /* We are good, now display the information if necessary */
     if (bDisplayInfo)
     {
-        if (Headers.pDosHeader)
+        switch (Headers.ImageType)
         {
-            if (bOldPE)
-                DumpOldPEImage(Headers.pDosHeader, Headers.u.pNtHeader);
-            else
-                DumpNewPEImage(Headers.pDosHeader, Headers.u.pNtHeaders);
-        }
-        else
-        {
-            DumpCOFFImage(&Headers.u.pNtHeaders->FileHeader);
+        case IMAGE_Coff32:
+            DumpCOFFImage(&Headers.u.NtHeaders32->FileHeader);
+            break;
+
+        case IMAGE_OldPE:
+            ASSERT(Headers.DosHeader);
+            DumpOldPEImage(Headers.DosHeader, Headers.u.NtHeader);
+            break;
+
+        case IMAGE_NewPE:
+            ASSERT(Headers.DosHeader);
+            DumpNewPEImage(Headers.DosHeader, Headers.u.NtHeaders32);
+            break;
+
+        default:
+            ASSERT(FALSE);
+            PrintError("Unrecognized image format!\n");
         }
     }
 
@@ -2675,35 +2712,36 @@ int main(int argc, char** argv)
         if (!pDestFile)
         {
             PrintError("Could not open destination file '%s'\n", pszDestFile);
-            nErrorCode = -7;
+            nErrorCode = -5;
             goto Quit;
         }
     }
 
-    if (Headers.pDosHeader && bOldPE)
+    if (Headers.ImageType == IMAGE_OldPE)
     {
         /* PE image - Either extract only the section specified by the user, or all of them */
+        ASSERT(Headers.DosHeader);
         if (!ProcessPEImage(/*pData*/ pSourceFile, nFileSize, pDestFile,
-                            Headers.pDosHeader, Headers.u.pNtHeader, NtHeaderSize))
+                            Headers.DosHeader, Headers.u.NtHeader, Headers.NtHeadersSize))
         {
             PrintError("ProcessPEImage() failed.\n");
-            nErrorCode = -8;
+            nErrorCode = -6;
             // goto Quit;
         }
     }
     else
     {
-        PrintError("Conversion of pure-COFF images is currently unimplemented.\n");
+        PrintError("Conversion of non-old-PE images is currently unimplemented.\n");
     }
 
     if (pDestFile)
         fclose(pDestFile);
 
 Quit:
-    if (Headers.u.pNtHeader)
-        free(Headers.u.pNtHeader);
-    if (Headers.pDosHeader)
-        free(Headers.pDosHeader);
+    if (Headers.u.NtHeader)
+        free(Headers.u.NtHeader);
+    if (Headers.DosHeader)
+        free(Headers.DosHeader);
 
     fclose(pSourceFile);
     // free(pData);
